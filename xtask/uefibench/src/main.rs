@@ -13,7 +13,7 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use core::error::Error;
-use ext4_view::{Ext4, Ext4Read};
+use ext4_rs::{Ext4, Ext4Read};
 use uefi::boot::{OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol};
 use uefi::proto::media::block::BlockIO;
 use uefi::proto::media::disk::DiskIo;

@@ -6,7 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use ext4_view::{Component, Path, PathBuf, PathError};
+use ext4_rs::{Component, Path, PathBuf, PathError};
 
 #[cfg(feature = "std")]
 use std::ffi::{OsStr, OsString};

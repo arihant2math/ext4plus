@@ -29,11 +29,11 @@ pub enum PathError {
     /// This error only occurs on non-Unix targets, where
     /// [`std::os::unix::ffi::OsStrExt`] is not available. On non-Unix
     /// targets, converting an [`OsStr`] or [`std::path::Path`] to
-    /// [`ext4_view::Path`] requires first converting the input to a
+    /// [`ext4_rs::Path`] requires first converting the input to a
     /// `&str`, which will fail if the input is not valid UTF-8.
     ///
     /// [`OsStr`]: std::ffi::OsStr
-    /// [`ext4_view::Path`]: Path
+    /// [`ext4_rs::Path`]: Path
     Encoding,
 }
 

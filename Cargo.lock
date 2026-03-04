@@ -241,8 +241,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "ext4-view"
-version = "0.9.3"
+name = "ext4-rs"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -833,7 +833,7 @@ dependencies = [
 name = "uefibench"
 version = "0.0.0"
 dependencies = [
- "ext4-view",
+ "ext4-rs",
  "sha2",
  "uefi",
 ]
@@ -1108,7 +1108,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
- "ext4-view",
+ "ext4-rs",
  "gpt_disk_io",
  "libc",
  "lzma-rs",

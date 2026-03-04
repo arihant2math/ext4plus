@@ -6,7 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use ext4_view::{
+use ext4_rs::{
     Ext4Error, File, FileType, FollowSymlinks, Inode, InodeCreationOptions,
     InodeFlags, InodeMode, Path, write_at,
 };
@@ -319,7 +319,7 @@ async fn test_init_directory_creates_dot_and_dotdot() {
         .await
         .unwrap();
 
-    ext4_view::init_directory(&fs, &mut dir_inode, root.index)
+    ext4_rs::init_directory(&fs, &mut dir_inode, root.index)
         .await
         .unwrap();
 
@@ -331,19 +331,19 @@ async fn test_init_directory_creates_dot_and_dotdot() {
     // Open the directory and verify '.' and '..'.
     let opened = fs.open(Path::new("/new_dir")).await.unwrap();
 
-    let dot = ext4_view::get_dir_entry_inode_by_name(
+    let dot = ext4_rs::get_dir_entry_inode_by_name(
         &fs,
         opened.inode(),
-        ext4_view::DirEntryName::try_from(".").unwrap(),
+        ext4_rs::DirEntryName::try_from(".").unwrap(),
     )
     .await
     .unwrap();
     assert_eq!(dot.index, opened.inode().index);
 
-    let dotdot = ext4_view::get_dir_entry_inode_by_name(
+    let dotdot = ext4_rs::get_dir_entry_inode_by_name(
         &fs,
         opened.inode(),
-        ext4_view::DirEntryName::try_from("..").unwrap(),
+        ext4_rs::DirEntryName::try_from("..").unwrap(),
     )
     .await
     .unwrap();

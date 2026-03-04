@@ -17,7 +17,7 @@ default-run = "xtask"
 [dependencies]
 anyhow.workspace = true
 clap = { version = "4.5.0", default-features = false, features = ["derive", "help", "std"] }
-ext4-view = { path = "../", features = ["std"] }
+ext4-rs = { path = "../", features = ["std"] }
 gpt_disk_io = { version = "0.16.0", features = ["std"] }
 libc = "0.2.155"
 lzma-rs = "0.3.0"

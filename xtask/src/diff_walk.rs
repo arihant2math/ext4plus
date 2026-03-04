@@ -8,7 +8,7 @@
 
 use crate::{capture_cmd, run_cmd, sudo};
 use anyhow::{Result, bail};
-use ext4_view::{Ext4, Ext4Error};
+use ext4_rs::{Ext4, Ext4Error};
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fs::File;
@@ -72,7 +72,7 @@ impl WalkDirEntry {
 
 fn new_dir_entry(
     fs: &Ext4,
-    dir_entry: ext4_view::DirEntry,
+    dir_entry: ext4_rs::DirEntry,
 ) -> Result<WalkDirEntry> {
     let path = dir_entry.path();
     let metadata = dir_entry.metadata()?;
@@ -98,13 +98,13 @@ fn new_dir_entry(
 
 fn walk_with_lib(
     fs: &Ext4,
-    path: ext4_view::Path<'_>,
+    path: ext4_rs::Path<'_>,
 ) -> Result<Vec<WalkDirEntry>> {
     let mut output = Vec::new();
 
     let metadata = fs.symlink_metadata(path)?;
     output.push(WalkDirEntry {
-        path: ext4_view::PathBuf::from(path).into(),
+        path: ext4_rs::PathBuf::from(path).into(),
         content: FileContent::Dir,
         mode: metadata.mode(),
         uid: metadata.uid(),
@@ -147,7 +147,7 @@ fn is_compressed(path: &Path) -> Result<bool> {
     Ok(buf == [0x28, 0xb5, 0x2f, 0xfd])
 }
 
-/// Check that walking the filesystem with the `ext4-view` crate gives
+/// Check that walking the filesystem with the `ext4-rs` crate gives
 /// the same results as mounting the filesystem and walking it with
 /// [`std::fs`].
 ///
@@ -207,7 +207,7 @@ pub fn diff_walk(orig_path: &Path) -> Result<()> {
     let actual = {
         let ext4 = Ext4::load_from_path(&path)?;
         let before_walk = SystemTime::now();
-        let mut paths = walk_with_lib(&ext4, ext4_view::Path::ROOT)?;
+        let mut paths = walk_with_lib(&ext4, ext4_rs::Path::ROOT)?;
         println!(
             "walk_with_lib took {:?}",
             SystemTime::now().duration_since(before_walk).unwrap()

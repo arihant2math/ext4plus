@@ -8,7 +8,7 @@
 
 use crate::expected_holes_data;
 use crate::test_util::load_compressed_filesystem;
-use ext4_view::Ext4;
+use ext4_rs::Ext4;
 
 pub async fn load_ext2() -> Ext4 {
     load_compressed_filesystem("test_disk_ext2.bin.zst").await

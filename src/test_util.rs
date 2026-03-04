@@ -154,13 +154,13 @@ pub(crate) async fn load_test_disk1_rw_no_fsck() -> Ext4 {
 /// Why this exists: `fsck.ext4` needs a path/device it can open; piping bytes on
 /// stdin doesn't work. We therefore materialize the bytes into a temporary file.
 ///
-/// Set `EXT4_VIEW_RUN_FSCK=1` to enable.
+/// Set `EXT4_RS_RUN_FSCK=1` to enable.
 /// On macOS, ext4 tooling is uncommon. If `fsck.ext4` isn't available locally,
-/// you can set `EXT4_VIEW_FSCK_DOCKER=1` to run the check via Docker using the
+/// you can set `EXT4_RS_FSCK_DOCKER=1` to run the check via Docker using the
 /// `e2fsprogs/e2fsprogs` image.
 #[allow(dead_code)]
 pub(crate) fn fsck_ext4_arc_image(image: &Arc<Mutex<Vec<u8>>>) {
-    if std::env::var_os("EXT4_VIEW_RUN_FSCK").is_none() {
+    if std::env::var_os("EXT4_RS_RUN_FSCK").is_none() {
         return;
     }
 
@@ -198,7 +198,7 @@ fn fsck_ext4_path(path: &Path) {
         );
     }
 
-    if std::env::var_os("EXT4_VIEW_FSCK_DOCKER").is_some() {
+    if std::env::var_os("EXT4_RS_FSCK_DOCKER").is_some() {
         let output = std::process::Command::new("docker")
             .args([
                 "run",
@@ -230,9 +230,9 @@ fn fsck_ext4_path(path: &Path) {
     }
 
     // If we got here, local fsck.ext4 wasn't available and docker fallback isn't enabled.
-    // Keep this as a panic because the caller explicitly opted in via EXT4_VIEW_RUN_FSCK.
+    // Keep this as a panic because the caller explicitly opted in via EXT4_RS_RUN_FSCK.
     panic!(
-        "EXT4_VIEW_RUN_FSCK=1 but `fsck.ext4` couldn't be executed. Install e2fsprogs or set EXT4_VIEW_FSCK_DOCKER=1. Path was: {}",
+        "EXT4_RS_RUN_FSCK=1 but `fsck.ext4` couldn't be executed. Install e2fsprogs or set EXT4_RS_FSCK_DOCKER=1. Path was: {}",
         path.display()
     );
 }

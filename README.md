@@ -1,4 +1,4 @@
-# ext4-view-rs
+# ext4-rs
 
 **Note: This project is a fork of the original and has different design goals (including async and write support).**
 

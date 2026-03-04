@@ -65,7 +65,7 @@ pub fn download_big_filesystems() -> Result<()> {
     {
         println!("downloading {url} to {}", download_path.display());
         let agent = Agent::config_builder()
-            .user_agent("https://github.com/nicholasbishop/ext4-view-rs")
+            .user_agent("https://github.com/arihant2math/ext4-rs")
             .build()
             .new_agent();
         let mut response = agent.get(&url).call()?.into_body().into_reader();

@@ -7,17 +7,18 @@
 # except according to those terms.
 
 [package]
-name = "ext4-view"
-version = "0.9.3"
+name = "ext4-rs"
+version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-repository = "https://github.com/nicholasbishop/ext4-view-rs"
+repository = "https://github.com/arihant2math/ext4-rs"
 categories = ["filesystem", "embedded", "no-std"]
-description = "No-std compatible Rust library for reading ext2/ext3/ext4 filesystems"
+description = "No-std compatible Rust library for ext2/ext3/ext4 filesystems"
 keywords = ["ext4", "ext2", "ext3", "filesystem", "no_std"]
 rust-version = "1.85"
 include = [
     "src/*.rs",
+    "src/file_blocks",
     "src/iters",
     "src/journal",
     "LICENSE-APACHE",

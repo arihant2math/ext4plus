@@ -13,7 +13,7 @@ use core::fmt::{self, Debug, Display, Formatter};
 /// # Example
 ///
 /// ```
-/// use ext4_view::Uuid;
+/// use ext4_rs::Uuid;
 ///
 /// let uuid = Uuid::new([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
 /// assert_eq!(format!("{uuid}"), "01020304-0506-0708-090a-0b0c0d0e0f10");

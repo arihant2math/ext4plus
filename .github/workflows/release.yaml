@@ -22,6 +22,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - run: cargo install auto-release
-      - run: auto-release -p ext4-view --condition subject
+      - run: auto-release -p ext4-rs --condition subject
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

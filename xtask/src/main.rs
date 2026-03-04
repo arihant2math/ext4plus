@@ -469,7 +469,7 @@ impl DiskParams {
 ///  6,7: data
 ///  8,9: hole
 ///
-/// Should match `expected_holes_data` in the ext4-view tests.
+/// Should match `expected_holes_data` in the ext4-rs tests.
 fn create_file_with_holes(path: &Path) -> Result<()> {
     let block_size = 1024;
     let mut data = Vec::new();
@@ -618,7 +618,7 @@ enum Action {
     ///
     /// This mounts a filesystem and walks the mount point, then
     /// compares the result with walking the filesystem via the
-    /// `ext4-view` crate.
+    /// `ext4-rs` crate.
     ///
     /// Note that mounting a filesystem normally requires elevated
     /// permissions, so this command runs some code with `sudo`.

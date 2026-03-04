@@ -20,7 +20,7 @@
 //! looks at files and directories in the filesystem.
 //!
 //! ```
-//! use ext4_view::{AsyncIterator, Ext4, Ext4Error, Metadata};
+//! use ext4_rs::{AsyncIterator, Ext4, Ext4Error, Metadata};
 //!
 //! #[tokio::main]
 //! async fn in_memory_example(fs_data: Vec<u8>) -> Result<(), Ext4Error> {
@@ -91,8 +91,6 @@
 //! Some functions list specific errors that may occur. These lists are
 //! not exhaustive; calling code should be prepared to handle other
 //! errors such as [`Ext4Error::Io`].
-//!
-//! [issues]: https://github.com/nicholasbishop/ext4-view-rs/issues
 
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]

@@ -9,7 +9,7 @@
 mod walk;
 
 use anyhow::Result;
-use ext4_view::Ext4;
+use ext4_rs::Ext4;
 use ovmf_prebuilt::{Arch, FileType, Prebuilt, Source};
 use std::fs;
 use std::path::{Path, PathBuf};
