@@ -1,2 +1,4 @@
 /target
 /test_data/chromiumos_*.bin
+
+.idea/
