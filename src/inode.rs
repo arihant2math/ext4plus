@@ -148,7 +148,7 @@ pub struct Inode {
     /// This is constant, so it is safe to cache it and expose it as a public field.
     pub index: InodeIndex,
 
-    /// Kept for backwards compatability, because initialization can cause erroring out.
+    /// Kept for backwards compatibility, because initialization can cause erroring out.
     file_type: FileType,
 
     /// Full inode data as read from disk.
