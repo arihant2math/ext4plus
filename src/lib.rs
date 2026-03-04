@@ -156,6 +156,7 @@ use journal::Journal;
 use superblock::Superblock;
 use util::usize_from_u32;
 
+use crate::util::u64_from_usize;
 pub use dir::{get_dir_entry_inode_by_name, init_directory};
 pub use dir_entry::{DirEntry, DirEntryName, DirEntryNameError};
 pub use error::{Corrupt, Ext4Error, Incompatible};
@@ -1274,7 +1275,7 @@ impl Ext4 {
             target_bytes[..target.as_ref().len()]
                 .copy_from_slice(target.as_ref());
             inode.set_inline_data(target_bytes);
-            inode.set_size_in_bytes(target.as_ref().len() as u64);
+            inode.set_size_in_bytes(u64_from_usize(target.as_ref().len()));
             inode.set_flags(InodeFlags::INLINE_DATA);
             inode.write(self).await?;
         } else {

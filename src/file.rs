@@ -14,7 +14,7 @@ use crate::iters::AsyncIterator;
 use crate::iters::file_blocks::FileBlocks;
 use crate::path::Path;
 use crate::resolve::FollowSymlinks;
-use crate::util::usize_from_u32;
+use crate::util::{u64_from_usize, usize_from_u32};
 use crate::{Ext4, InodeFlags, file_blocks};
 use core::cmp::max;
 use core::fmt::{self, Debug, Formatter};
@@ -285,20 +285,21 @@ impl File {
             tree.extend(
                 0,
                 NonZeroU32::new(
-                    buf.len().div_ceil(block_size.to_usize()) as u32
+                    u32::try_from(buf.len().div_ceil(block_size.to_usize()))
+                        .map_err(|_| Ext4Error::NoSpace)?,
                 )
                 .unwrap(),
             )
             .await?;
             for i in 0..buf.len().div_ceil(block_size.to_usize()) as u32 {
                 let block_index = tree.get_block(i).await?.unwrap();
-                let buf_offset = (i as usize) * block_size.to_usize();
+                let buf_offset = (usize_from_u32(i)) * block_size.to_usize();
                 let to_write = &buf[buf_offset
                     ..(buf_offset + block_size.to_usize()).min(buf.len())];
                 self.fs.write_to_block(block_index, 0, to_write).await?;
             }
             self.inode.set_inline_data(tree.to_bytes());
-            self.inode.set_size_in_bytes(buf.len() as u64);
+            self.inode.set_size_in_bytes(u64_from_usize(buf.len()));
             self.inode.write(&self.fs).await?;
             self.file_blocks = FileBlocks::new(self.fs.clone(), &self.inode)?;
             return Ok(buf.len());
@@ -499,7 +500,8 @@ pub async fn write_at(
                 clippy::arithmetic_side_effects,
                 reason = "Extent start + offset stays within u64 for valid filesystems"
             )]
-            let fs_block = extent.start_block + (offset_in_extent + i) as u64;
+            let fs_block =
+                extent.start_block + u64_from_usize(offset_in_extent + i);
 
             let (block_off, cap) = if i == 0 {
                 (offset_in_block, block_size - offset_in_block)
@@ -598,7 +600,7 @@ pub async fn write_at(
                 clippy::arithmetic_side_effects,
                 reason = "Extent start + offset stays within u64 for valid filesystems"
             )]
-            let fs_block = extent.start_block + i as u64;
+            let fs_block = extent.start_block + u64_from_usize(i);
 
             let (block_offset, capacity) = if i == 0 {
                 (offset_in_block, block_size - offset_in_block)
@@ -641,8 +643,9 @@ pub async fn write_at(
     }
 
     let start_block =
-        FileBlockIndex::try_from(offset / block_size as u64).unwrap();
-    let mut start_offset_in_block = (offset % block_size as u64) as usize;
+        FileBlockIndex::try_from(offset / u64_from_usize(block_size)).unwrap();
+    let mut start_offset_in_block =
+        (offset % u64_from_usize(block_size)) as usize;
     let mut bytes_remaining = buf.len();
     let mut buf_pos = 0usize;
     let mut current_block = start_block;
@@ -730,11 +733,12 @@ pub async fn write_at(
                 bytes_remaining -= advanced_bytes;
                 buf_pos += advanced_bytes;
                 current_block = FileBlockIndex::try_from(
-                    (offset + (buf_pos as u64)) / (block_size as u64),
+                    (offset + u64_from_usize(buf_pos))
+                        / u64_from_usize(block_size),
                 )
                 .unwrap();
-                start_offset_in_block = ((offset + (buf_pos as u64))
-                    % (block_size as u64))
+                start_offset_in_block = ((offset + u64_from_usize(buf_pos))
+                    % (u64_from_usize(block_size)))
                     as usize;
             }
             None => {
@@ -802,11 +806,12 @@ pub async fn write_at(
                 bytes_remaining -= advanced_bytes;
                 buf_pos += advanced_bytes;
                 current_block = FileBlockIndex::try_from(
-                    (offset + (buf_pos as u64)) / (block_size as u64),
+                    (offset + u64_from_usize(buf_pos))
+                        / (u64_from_usize(block_size)),
                 )
                 .unwrap();
-                start_offset_in_block = ((offset + (buf_pos as u64))
-                    % (block_size as u64))
+                start_offset_in_block = ((offset + u64_from_usize(buf_pos))
+                    % (u64_from_usize(block_size)))
                     as usize;
             }
         }
@@ -816,7 +821,7 @@ pub async fn write_at(
 
     inode.set_size_in_bytes(max(
         inode.size_in_bytes(),
-        offset + (total_written as u64),
+        offset + u64_from_usize(total_written),
     ));
     inode.set_inline_data(extent_tree.to_bytes());
     inode.write(ext4).await?;

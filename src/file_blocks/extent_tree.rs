@@ -140,7 +140,7 @@ impl ExtentInternalNode {
         let ei_block = read_u32le(data, 0);
         let (ei_start_lo, ei_start_hi) =
             (read_u32le(data, 4), read_u16le(data, 8));
-        let ei_start = u64_from_hilo(ei_start_hi as u32, ei_start_lo);
+        let ei_start = u64_from_hilo(u32::from(ei_start_hi), ei_start_lo);
 
         Ok(Self {
             block_within_file: ei_block,
@@ -456,7 +456,7 @@ impl ExtentTree {
         // Otherwise, panic for now
         let last_allocated = self.last_allocated_extent().await?;
         if let Some((path, last_extent)) = last_allocated {
-            if last_extent.block_within_file + last_extent.num_blocks as u32
+            if last_extent.block_within_file + u32::from(last_extent.num_blocks)
                 >= start
             {
                 panic!("can't allocate overlapping extent");
@@ -825,8 +825,8 @@ impl ExtentTree {
             let left = extents[insert_at - 1];
             let left_end =
                 left.block_within_file + FileBlockIndex::from(left.num_blocks);
-            let left_phys_end =
-                left.start_block + FsBlockIndex::from(left.num_blocks as u32);
+            let left_phys_end = left.start_block
+                + FsBlockIndex::from(u32::from(left.num_blocks));
             left_end == new_start
                 && left_phys_end == new_extent.start_block
                 && left.is_initialized == new_extent.is_initialized
@@ -837,7 +837,7 @@ impl ExtentTree {
         let can_merge_right = if insert_at < extents.len() {
             let right = extents[insert_at];
             let phys_end = new_extent.start_block
-                + FsBlockIndex::from(new_extent.num_blocks as u32);
+                + FsBlockIndex::from(u32::from(new_extent.num_blocks));
             new_end == right.block_within_file
                 && phys_end == right.start_block
                 && right.is_initialized == new_extent.is_initialized
@@ -863,8 +863,8 @@ impl ExtentTree {
             };
 
             let left = &mut extents[insert_at - 1];
-            let new_len = (left.num_blocks as u32)
-                .checked_add(new_extent.num_blocks as u32)
+            let new_len = (u32::from(left.num_blocks))
+                .checked_add(u32::from(new_extent.num_blocks))
                 .ok_or(Ext4Error::NoSpace)?;
             left.num_blocks = u16::try_from(new_len)
                 .map_err(|_| CorruptKind::ExtentBlock(self.inode))?;
@@ -873,15 +873,15 @@ impl ExtentTree {
             if let Some(right) = right_for_possible_merge {
                 // After merging into left, right is still at index insert_at.
                 let left_phys_end = left.start_block
-                    + FsBlockIndex::from(left.num_blocks as u32);
+                    + FsBlockIndex::from(u32::from(left.num_blocks));
                 let left_end = left.block_within_file
                     + FileBlockIndex::from(left.num_blocks);
                 if left_end == right.block_within_file
                     && left_phys_end == right.start_block
                     && left.is_initialized == right.is_initialized
                 {
-                    let combined = (left.num_blocks as u32)
-                        .checked_add(right.num_blocks as u32)
+                    let combined = (u32::from(left.num_blocks))
+                        .checked_add(u32::from(right.num_blocks))
                         .ok_or(Ext4Error::NoSpace)?;
                     left.num_blocks = u16::try_from(combined)
                         .map_err(|_| CorruptKind::ExtentBlock(self.inode))?;
@@ -893,8 +893,8 @@ impl ExtentTree {
             let right = &mut extents[insert_at];
             right.block_within_file = new_start;
             right.start_block = new_extent.start_block;
-            let new_len = (right.num_blocks as u32)
-                .checked_add(new_extent.num_blocks as u32)
+            let new_len = (u32::from(right.num_blocks))
+                .checked_add(u32::from(new_extent.num_blocks))
                 .ok_or(Ext4Error::NoSpace)?;
             right.num_blocks = u16::try_from(new_len)
                 .map_err(|_| CorruptKind::ExtentBlock(self.inode))?;
