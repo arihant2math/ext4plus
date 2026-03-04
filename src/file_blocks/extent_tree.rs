@@ -999,7 +999,7 @@ impl ExtentTree {
             };
 
             extents[i] = left;
-            extents.insert(i + 1, right);
+            extents.insert(i.checked_add(1).unwrap(), right);
 
             Ok((true, i == 0))
         }
