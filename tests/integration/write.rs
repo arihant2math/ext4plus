@@ -41,7 +41,7 @@ async fn test_write_into_hole() {
 }
 
 #[tokio::test]
-async fn test_write_caps_to_file_end_and_block_boundary() {
+async fn test_write_basic() {
     // Load filesystem with writer.
     let fs = load_test_disk1_rw().await;
 
