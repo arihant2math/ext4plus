@@ -71,11 +71,6 @@ pub enum Ext4Error {
     TooManySymlinks,
 
     /// Attempted to read an encrypted file.
-    ///
-    /// Only unencrypted files are currently supported. Please file an
-    /// [issue] if you have a use case for reading encrypted files.
-    ///
-    /// [issue]: https://github.com/nicholasbishop/ext4-view-rs/issues/new
     Encrypted,
 
     /// An IO operation failed. This error comes from the [`Ext4Read`]
