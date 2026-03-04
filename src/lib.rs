@@ -125,6 +125,7 @@ mod inode;
 mod iters;
 mod journal;
 mod label;
+mod mem_io_error;
 mod metadata;
 mod path;
 mod reader;
@@ -132,6 +133,7 @@ mod resolve;
 mod superblock;
 mod util;
 mod uuid;
+mod writer;
 
 #[cfg(all(test, feature = "std"))]
 mod test_util;
@@ -168,11 +170,13 @@ pub use inode::{Inode, InodeCreationOptions, InodeFlags, InodeMode};
 pub use iters::read_dir::ReadDir;
 pub use iters::{AsyncFilter, AsyncIterator, AsyncMap, AsyncSkip};
 pub use label::Label;
+pub use mem_io_error::MemIoError;
 pub use metadata::Metadata;
 pub use path::{Component, Components, Path, PathBuf, PathError};
-pub use reader::{Ext4Read, Ext4Write, MemIoError};
+pub use reader::Ext4Read;
 pub use resolve::FollowSymlinks;
 pub use uuid::Uuid;
+pub use writer::Ext4Write;
 
 struct Ext4Inner {
     superblock: Superblock,
