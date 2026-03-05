@@ -634,11 +634,10 @@ async fn write_at_extent(
                 // extent covers a range of file blocks
                 let extent_block_start = extent.block_within_file;
                 let extent_block_len = extent.num_blocks as u64;
-                let offset_in_extent =
-                    (current_block - extent_block_start) as u64;
+                let offset_in_extent = current_block - extent_block_start;
                 // number of blocks available in this extent starting at current_block
                 let avail_blocks_in_extent =
-                    (extent_block_len - offset_in_extent) as usize;
+                    (extent_block_len - u64::from(offset_in_extent)) as usize;
 
                 // determine how many bytes we can handle within this extent in a single run:
                 // convert bytes_remaining + start_offset_in_block... but simpler: compute how many file-blocks
@@ -675,7 +674,7 @@ async fn write_at_extent(
                     total_written += write_into_mapped_initialized_extent(
                         ext4,
                         &extent,
-                        offset_in_extent as usize,
+                        usize_from_u32(offset_in_extent),
                         run_blocks,
                         &buf[buf_pos..buf_pos + slice_len],
                         start_offset_in_block,
@@ -690,7 +689,7 @@ async fn write_at_extent(
                         ext4,
                         inode,
                         &extent,
-                        offset_in_extent as usize,
+                        usize_from_u32(offset_in_extent),
                         run_blocks,
                         &buf[buf_pos..buf_pos + slice_len],
                         start_offset_in_block,
@@ -703,16 +702,18 @@ async fn write_at_extent(
                 // advance
                 // Advance based on what we actually wrote from `buf`.
                 let advanced_bytes = slice_len;
-                bytes_remaining -= advanced_bytes;
-                buf_pos += advanced_bytes;
+                bytes_remaining =
+                    bytes_remaining.checked_sub(advanced_bytes).unwrap();
+                buf_pos = buf_pos.checked_add(advanced_bytes).unwrap();
                 current_block = FileBlockIndex::try_from(
-                    (offset + u64_from_usize(buf_pos))
+                    (offset.checked_add(u64_from_usize(buf_pos)).unwrap())
                         / u64_from_usize(block_size),
                 )
                 .unwrap();
-                start_offset_in_block = ((offset + u64_from_usize(buf_pos))
-                    % (u64_from_usize(block_size)))
-                    as usize;
+                start_offset_in_block =
+                    ((offset.checked_add(u64_from_usize(buf_pos)).unwrap())
+                        % (u64_from_usize(block_size)))
+                        as usize;
             }
             None => {
                 // case C: hole -> allocate new blocks, create initialized extents and write
@@ -730,7 +731,10 @@ async fn write_at_extent(
                     match ext4
                         .alloc_contiguous_blocks(
                             inode.index,
-                            NonZeroU32::new(tried_blocks as u32).unwrap(),
+                            NonZeroU32::new(
+                                u32::try_from(tried_blocks).unwrap(),
+                            )
+                            .unwrap(),
                         )
                         .await
                     {
@@ -750,7 +754,7 @@ async fn write_at_extent(
                 let new_extent = Extent::new(
                     current_block,
                     start_fs_block,
-                    tried_blocks as u16,
+                    u16::try_from(tried_blocks).unwrap(),
                 );
                 extent_tree.insert_extent(new_extent).await?;
                 // Write data into the newly allocated blocks (same logic as initialized extents except we don't need to read old content)
@@ -762,30 +766,38 @@ async fn write_at_extent(
                 );
                 let have_bytes = bytes_remaining;
                 let slice_len = core::cmp::min(want_bytes, have_bytes);
-                total_written += write_into_newly_allocated_extent(
-                    ext4,
-                    &new_extent,
-                    start_offset_in_block,
-                    &buf[buf_pos..buf_pos + slice_len],
-                    block_size,
-                )
-                .await?;
+                total_written = total_written
+                    .checked_add(
+                        write_into_newly_allocated_extent(
+                            ext4,
+                            &new_extent,
+                            start_offset_in_block,
+                            &buf[buf_pos
+                                ..buf_pos.checked_add(slice_len).unwrap()],
+                            block_size,
+                        )
+                        .await?,
+                    )
+                    .unwrap();
 
                 // advance variables
                 // We must advance based on how many bytes we actually wrote into the
                 // newly allocated blocks. Advancing by the theoretical block capacity
                 // can underflow `bytes_remaining` when `slice_len` is smaller.
                 let advanced_bytes = slice_len;
-                bytes_remaining -= advanced_bytes;
-                buf_pos += advanced_bytes;
+                bytes_remaining =
+                    bytes_remaining.checked_sub(advanced_bytes).unwrap();
+                buf_pos = buf_pos.checked_add(advanced_bytes).unwrap();
                 current_block = FileBlockIndex::try_from(
-                    (offset + u64_from_usize(buf_pos))
-                        / (u64_from_usize(block_size)),
+                    (offset.checked_add(u64_from_usize(buf_pos)).unwrap())
+                        .checked_div(u64_from_usize(block_size))
+                        .unwrap(),
                 )
                 .unwrap();
-                start_offset_in_block = ((offset + u64_from_usize(buf_pos))
-                    % (u64_from_usize(block_size)))
-                    as usize;
+                start_offset_in_block =
+                    ((offset.checked_add(u64_from_usize(buf_pos)).unwrap())
+                        % (u64_from_usize(block_size)))
+                        as usize;
             }
         }
 
@@ -794,7 +806,7 @@ async fn write_at_extent(
 
     inode.set_size_in_bytes(max(
         inode.size_in_bytes(),
-        offset + u64_from_usize(total_written),
+        offset.checked_add(u64_from_usize(total_written)).unwrap(),
     ));
     inode.set_inline_data(extent_tree.to_bytes());
     inode.write(ext4).await?;
