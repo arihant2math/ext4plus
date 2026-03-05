@@ -187,14 +187,6 @@ struct Ext4Inner {
     ///
     /// Stored as `Box<dyn Ext4Read>` rather than a generic type to make
     /// the `Ext4` type more convenient to pass around for users of the API.
-    ///
-    /// The `Ext4Read::read` method takes `&mut self`, because readers
-    /// like `std::fs::File` are mutable. However, the `Ext4` API is
-    /// logically const -- it provides read-only access to the
-    /// filesystem. So the box is wrapped in `RefCell` to allow the
-    /// mutable method to be called with an immutable `&Ext4Inner`
-    /// reference. `RefCell` enforces at runtime that only one mutable
-    /// borrow exists at a time.
     reader: Box<dyn Ext4Read>,
     /// Optional writer providing write access to the underlying storage.
     writer: Option<Box<dyn Ext4Write>>,
