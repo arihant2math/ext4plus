@@ -99,13 +99,13 @@ pub(crate) async fn add_dir_entry_non_htree(
         let mut off = 0usize;
         while off < block_size {
             let inode_field = read_u32le(&block_buf, off);
-            let rec_len = read_u16le(&block_buf, off + 4);
+            let rec_len = read_u16le(&block_buf, off.checked_add(4).unwrap());
             let rec_len_usize = usize::from(rec_len);
 
             if rec_len_usize < 8 || off.checked_add(rec_len_usize).is_none() {
                 return Err(CorruptKind::DirEntry(dir_inode.index).into());
             }
-            if off + rec_len_usize > block_size {
+            if off.checked_add(rec_len_usize).unwrap() > block_size {
                 return Err(CorruptKind::DirEntry(dir_inode.index).into());
             }
 
@@ -113,28 +113,28 @@ pub(crate) async fn add_dir_entry_non_htree(
             let used = if inode_field == 0 {
                 0usize
             } else {
-                let name_len = usize::from(block_buf[off + 6]);
+                let name_len = usize::from(block_buf[off.checked_add(6).unwrap()]);
                 dir_entry_min_size(name_len)
             };
 
-            if rec_len_usize >= used + need {
+            if rec_len_usize >= used.checked_add(need).unwrap() {
                 // Shrink current entry to its minimal size (or keep 0 if unused),
                 // and place the new entry in the leftover space.
                 let new_rec_len_for_curr =
                     if inode_field == 0 { 0usize } else { used };
-                let free_start = off + new_rec_len_for_curr;
-                let free_len = rec_len_usize - new_rec_len_for_curr;
+                let free_start = off.checked_add(new_rec_len_for_curr).unwrap();
+                let free_len = rec_len_usize.checked_sub(new_rec_len_for_curr).unwrap();
 
                 if free_len < need {
                     // Shouldn't happen due to earlier check, but keep safe.
-                    off += rec_len_usize;
+                    off = off.checked_add(rec_len_usize).unwrap();
                     continue;
                 }
 
                 if inode_field != 0 {
                     write_u16le(
                         &mut block_buf,
-                        off + 4,
+                        off.checked_add(4).unwrap(),
                         u16::try_from(new_rec_len_for_curr).map_err(|_| {
                             Ext4Error::from(CorruptKind::DirEntry(
                                 dir_inode.index,
@@ -145,7 +145,7 @@ pub(crate) async fn add_dir_entry_non_htree(
                     // Make sure an unused entry becomes a valid single free record by giving it its full size.
                     write_u16le(
                         &mut block_buf,
-                        off + 4,
+                        off.checked_add(4).unwrap(),
                         u16::try_from(rec_len_usize).map_err(|_| {
                             Ext4Error::from(CorruptKind::DirEntry(
                                 dir_inode.index,
@@ -180,7 +180,7 @@ pub(crate) async fn add_dir_entry_non_htree(
                 return Ok(());
             }
 
-            off += rec_len_usize;
+            off = off.checked_add(rec_len_usize).unwrap();
         }
 
         is_first = false;
@@ -224,18 +224,20 @@ pub(crate) async fn remove_dir_entry_non_htree(
 
         while off < block_size {
             let inode_field = read_u32le(&block_buf, off);
-            let rec_len = read_u16le(&block_buf, off + 4);
+            let rec_len = read_u16le(&block_buf, off.checked_add(4).unwrap());
             let rec_len_usize = usize::from(rec_len);
 
-            if rec_len_usize < 8 || off + rec_len_usize > block_size {
+            if rec_len_usize < 8
+                || off.checked_add(rec_len_usize).unwrap() > block_size
+            {
                 return Err(CorruptKind::DirEntry(dir_inode.index).into());
             }
 
             if inode_field != 0 {
-                let name_len = usize::from(block_buf[off + 6]);
-                let name_start = off + 8;
-                let name_end = name_start + name_len;
-                if name_end > off + rec_len_usize {
+                let name_len = usize::from(block_buf[off.checked_add(6).unwrap()]);
+                let name_start = off.checked_add(8).unwrap();
+                let name_end = name_start.checked_add(name_len).unwrap();
+                if name_end > off.checked_add(rec_len_usize).unwrap() {
                     return Err(CorruptKind::DirEntry(dir_inode.index).into());
                 }
 
@@ -256,7 +258,7 @@ pub(crate) async fn remove_dir_entry_non_htree(
                             .unwrap();
                         write_u16le(
                             &mut block_buf,
-                            poff + 4,
+                            poff.checked_add(4).unwrap(),
                             u16::try_from(new_len).map_err(|_| {
                                 Ext4Error::from(CorruptKind::DirEntry(
                                     dir_inode.index,
@@ -287,7 +289,7 @@ pub(crate) async fn remove_dir_entry_non_htree(
             }
 
             prev_off = Some(off);
-            off += rec_len_usize;
+            off = off.checked_add(rec_len_usize).unwrap();
         }
 
         is_first = false;
@@ -434,11 +436,13 @@ fn write_dir_entry_bytes(
     block[off.checked_add(7).unwrap()] = file_type.to_dir_entry();
 
     let name_start = off.checked_add(8).unwrap();
-    let name_end = name_start + name.as_ref().len();
+    let name_end = name_start
+        .checked_add(name.as_ref().len())
+        .unwrap();
     block[name_start..name_end].copy_from_slice(name.as_ref());
 
     // Zero padding up to `rec_len`.
-    for b in &mut block[name_end..off + rec_len] {
+    for b in &mut block[name_end..off.checked_add(rec_len).unwrap()] {
         *b = 0;
     }
 
