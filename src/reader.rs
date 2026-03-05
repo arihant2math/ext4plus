@@ -76,7 +76,7 @@ impl Ext4Read for std::fs::File {
 
         let total = self
             .read_at(dst, start_byte)
-            .map_err(|e| Box::new(e) as BoxedError)?;
+            .map_err(Box::new)?;
         if total != dst.len() {
             return Err(Box::new(MemIoError {
                 start: start_byte,
