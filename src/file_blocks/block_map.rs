@@ -90,7 +90,9 @@ impl BlockMap {
         file_block_index: FileBlockIndex,
     ) -> Result<FsBlockIndex, Ext4Error> {
         if usize_from_u32(file_block_index) < DIRECT_BLOCKS {
-            Ok(self.direct_blocks[file_block_index as usize] as u64)
+            Ok(u64::from(
+                self.direct_blocks[usize_from_u32(file_block_index)],
+            ))
         } else {
             todo!(
                 "Handle indirect blocks for file block index {}",
@@ -105,8 +107,8 @@ impl BlockMap {
         fs_block_index: FsBlockIndex,
     ) {
         if usize_from_u32(file_block_index) < DIRECT_BLOCKS {
-            self.direct_blocks[file_block_index as usize] =
-                fs_block_index as u32;
+            self.direct_blocks[usize_from_u32(file_block_index)] =
+                u32::try_from(fs_block_index).unwrap();
         } else {
             todo!(
                 "Handle indirect blocks for file block index {}",
