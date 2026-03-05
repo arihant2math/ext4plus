@@ -169,7 +169,7 @@ impl<I: AsyncIterator> AsyncIterator for AsyncSkip<I> {
     async fn next(&mut self) -> Option<Self::Item> {
         while self.n > 0 {
             match self.iter.next().await {
-                Some(_) => self.n -= self.n.checked_sub(1).unwrap(),
+                Some(_) => self.n = self.n.checked_sub(1).unwrap(),
                 None => return None,
             }
         }
