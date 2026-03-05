@@ -1,9 +1,11 @@
 use crate::Inode;
 use crate::block_index::{FileBlockIndex, FsBlockIndex};
-use crate::util::read_u32le;
+use crate::util::{read_u32le, usize_from_u32};
+
+const DIRECT_BLOCKS: usize = 12;
 
 pub(crate) struct BlockMap {
-    direct_blocks: [u32; 12],
+    direct_blocks: [u32; DIRECT_BLOCKS],
     single_indirect_block: u32,
     double_indirect_block: u32,
     triple_indirect_block: u32,
@@ -12,7 +14,7 @@ pub(crate) struct BlockMap {
 impl BlockMap {
     pub(crate) fn initialize() -> Self {
         Self {
-            direct_blocks: [0; 12],
+            direct_blocks: [0; DIRECT_BLOCKS],
             single_indirect_block: 0,
             double_indirect_block: 0,
             triple_indirect_block: 0,
@@ -21,13 +23,13 @@ impl BlockMap {
 
     pub(crate) fn from_inode(inode: &Inode) -> Self {
         let data = inode.inline_data();
-        let mut direct_blocks = [0; 12];
+        let mut direct_blocks = [0; DIRECT_BLOCKS];
         for (i, direct_block) in direct_blocks.iter_mut().enumerate() {
             *direct_block = read_u32le(&data, i * 4);
         }
-        let single_indirect_block = read_u32le(&data, 12 * 4);
-        let double_indirect_block = read_u32le(&data, 13 * 4);
-        let triple_indirect_block = read_u32le(&data, 14 * 4);
+        let single_indirect_block = read_u32le(&data, DIRECT_BLOCKS * 4);
+        let double_indirect_block = read_u32le(&data, (DIRECT_BLOCKS + 1) * 4);
+        let triple_indirect_block = read_u32le(&data, (DIRECT_BLOCKS + 2) * 4);
         Self {
             direct_blocks,
             single_indirect_block,
@@ -55,7 +57,7 @@ impl BlockMap {
         &self,
         file_block_index: FileBlockIndex,
     ) -> FsBlockIndex {
-        if file_block_index < 12 {
+        if usize_from_u32(file_block_index) < DIRECT_BLOCKS {
             self.direct_blocks[file_block_index as usize] as u64
         } else {
             todo!(
@@ -70,7 +72,7 @@ impl BlockMap {
         file_block_index: FileBlockIndex,
         fs_block_index: FsBlockIndex,
     ) {
-        if file_block_index < 12 {
+        if usize_from_u32(file_block_index) < DIRECT_BLOCKS {
             self.direct_blocks[file_block_index as usize] =
                 fs_block_index as u32;
         } else {
