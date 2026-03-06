@@ -231,9 +231,9 @@ impl Inode {
     /// Initialize a new inode with the given index and creation data, and write it to disk.
     /// Assumes that the caller has already allocated the inode and is passing in a valid index.
     pub(crate) async fn create(
-        ext4: &Ext4,
         index: InodeIndex,
         inode_creation_data: InodeCreationOptions,
+        ext4: &Ext4,
     ) -> Result<Self, Ext4Error> {
         let inode_data = vec![0; usize::from(ext4.0.superblock.inode_size())];
         let mut checksum_base =

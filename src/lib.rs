@@ -876,7 +876,7 @@ impl Ext4 {
     ) -> Result<Inode, Ext4Error> {
         // TODO: for the purposes of fsck, it is proper to write inode data, then mark as used
         let inode_index = self.alloc_inode(options.file_type).await?;
-        Inode::create(self, inode_index, options).await
+        Inode::create(inode_index, options, self).await
     }
 
     /// Read the entire contents of a file into a `Vec<u8>`.
