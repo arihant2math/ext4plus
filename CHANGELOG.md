@@ -6,6 +6,7 @@
 - Add `truncate` function for `File::truncate` without a file struct.
 - Fix post-write position update in `File::write`
 - Expose `Dir` object, which is like `File`. De-exposes `get_dir_entry_inode_by_name` and `init_directory`, these can be done by `Directory` instead.
+- Bump MSRV to 1.86
 
 ## 0.1.0-alpha.2
 
