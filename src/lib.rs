@@ -156,9 +156,8 @@ use inode::{InodeIndex, get_inode_block_group_location};
 use iters::file_blocks::FileBlocks;
 use journal::Journal;
 use superblock::Superblock;
-use util::usize_from_u32;
+use util::{u64_from_usize, usize_from_u32};
 
-use crate::util::u64_from_usize;
 pub use dir::{get_dir_entry_inode_by_name, init_directory};
 pub use dir_entry::{DirEntry, DirEntryName, DirEntryNameError};
 pub use error::{Corrupt, Ext4Error, Incompatible};
