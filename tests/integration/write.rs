@@ -8,7 +8,7 @@
 
 use ext4plus::{
     Ext4Error, File, FileType, FollowSymlinks, Inode, InodeCreationOptions,
-    InodeFlags, InodeMode, Path, write_at,
+    InodeFlags, InodeMode, Path, truncate, write_at,
 };
 use tokio;
 
@@ -350,4 +350,26 @@ async fn test_init_directory_creates_dot_and_dotdot() {
     .await
     .unwrap();
     assert_eq!(dotdot.index, root.index);
+}
+
+#[tokio::test]
+async fn test_truncate() {
+    let fs = load_test_disk1_rw().await;
+    let mut inode = fs
+        .path_to_inode("/small_file".try_into().unwrap(), FollowSymlinks::All)
+        .await
+        .unwrap();
+    let data = b"Hello, world! This file will be truncated.";
+    write_at(&fs, &mut inode, data, 0).await.unwrap();
+    // Truncate the file to a smaller size.
+    truncate(&fs, &mut inode, 5).await.unwrap();
+    let data = b"Hello";
+    // Read back the inode and verify new length.
+    let inode = Inode::read(&fs, inode.index).await.unwrap();
+    assert_eq!(inode.size_in_bytes(), data.len() as u64);
+    let mut file = File::open_inode(&fs, inode).unwrap();
+    let mut buf = vec![0u8; data.len()];
+    let n = file.read_bytes(&mut buf).await.unwrap();
+    assert_eq!(n, data.len());
+    assert_eq!(&buf, data);
 }

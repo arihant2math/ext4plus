@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- `File::truncate` now can be used beyond block boundaries, and will zero out new blocks as needed.
+- Add `truncate` function for `File::truncate` without a file struct.
 - Fix post-write position update in `File::write`
 
 ## 0.1.0-alpha.2

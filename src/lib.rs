@@ -162,7 +162,7 @@ pub use dir::{get_dir_entry_inode_by_name, init_directory};
 pub use dir_entry::{DirEntry, DirEntryName, DirEntryNameError};
 pub use error::{Corrupt, Ext4Error, Incompatible};
 pub use features::IncompatibleFeatures;
-pub use file::{File, read_at, write_at};
+pub use file::{File, read_at, truncate, write_at};
 pub use file_type::FileType;
 pub use format::BytesDisplay;
 pub use inode::{Inode, InodeCreationOptions, InodeFlags, InodeMode};
@@ -830,7 +830,6 @@ impl Ext4 {
     }
 
     /// Frees `num_blocks` contiguous blocks starting at `block_index`.
-    #[expect(unused)]
     pub(crate) async fn free_blocks(
         &self,
         block_index: FsBlockIndex,

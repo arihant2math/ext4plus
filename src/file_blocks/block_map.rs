@@ -116,4 +116,35 @@ impl BlockMap {
             );
         }
     }
+
+    /// Clear a range of file blocks from the mapping and return the corresponding
+    /// allocated filesystem blocks (non-zero only).
+    pub(crate) fn remove_range(
+        &mut self,
+        start: FileBlockIndex,
+        count: u32,
+    ) -> Result<alloc::vec::Vec<FsBlockIndex>, Ext4Error> {
+        use alloc::vec::Vec;
+
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+
+        let start_usize = usize_from_u32(start);
+        let end_usize = start_usize.checked_add(usize_from_u32(count)).unwrap();
+
+        if end_usize <= DIRECT_BLOCKS {
+            let mut freed = Vec::new();
+            for i in start_usize..end_usize {
+                let blk = self.direct_blocks[i];
+                if blk != 0 {
+                    freed.push(u64::from(blk));
+                    self.direct_blocks[i] = 0;
+                }
+            }
+            Ok(freed)
+        } else {
+            todo!("truncate/shrink for indirect blocks")
+        }
+    }
 }

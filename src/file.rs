@@ -196,68 +196,10 @@ impl File {
         Ok(buf.len())
     }
 
-    /// Truncate or extend the file to `new_size` without allocating or deallocating blocks.
-    ///
-    /// - Shrinking succeeds only if it does not require freeing any blocks (i.e., stays within
-    ///   the same last allocated block).
-    /// - Growing succeeds only if it does not require allocating new blocks (i.e., the target
-    ///   position lies within already allocated blocks or holes are not introduced).
+    /// Truncate the file to `new_size` bytes.
     pub async fn truncate(&mut self, new_size: u64) -> Result<(), Ext4Error> {
-        let block_size = self.fs.0.superblock.block_size();
-
-        // Fast path: no change.
-        if new_size == self.inode.size_in_bytes() {
-            return Ok(());
-        }
-
-        async fn block_for_position(
-            fs: &Ext4,
-            inode: &Inode,
-            pos: u64,
-        ) -> Result<Option<FsBlockIndex>, Ext4Error> {
-            if pos == 0 {
-                return Ok(None);
-            }
-            let block_size = fs.0.superblock.block_size();
-            let mut it = FileBlocks::new(fs.clone(), inode)?;
-            #[expect(
-                clippy::arithmetic_side_effects,
-                reason = "We check for pos == 0 above"
-            )]
-            let num_blocks = (pos - 1) / block_size.to_nz_u64();
-            for _ in 0..num_blocks {
-                // Advance ignoring value; EOF handled when pos exceeds file mapping.
-                it.next().await;
-            }
-            match it.next().await {
-                Some(res) => Ok(Some(res?)),
-                None => Ok(Some(0)), // Past mapped blocks -> implies deallocation would be required
-            }
-        }
-
-        let curr_size = self.inode.size_in_bytes();
-        if new_size < curr_size {
-            // ensure we do not cross a block boundary in a way that would free blocks.
-            let curr_block_num = curr_size / block_size.to_nz_u64();
-            let new_block_num = new_size / block_size.to_nz_u64();
-            if curr_block_num != new_block_num {
-                return Err(Ext4Error::Readonly);
-            }
-            // Within same block: just update size metadata.
-            self.inode.set_size_in_bytes(new_size);
-            self.inode.write(&self.fs).await
-        } else {
-            // Grow: ensure target lies within already allocated blocks (no allocation).
-            let target_block =
-                block_for_position(&self.fs, &self.inode, new_size).await?;
-            // If target_block is Some(0) -> hole or beyond mapping; allocation would be needed.
-            if matches!(target_block, Some(0)) {
-                return Err(Ext4Error::Readonly);
-            }
-            // Otherwise permitted: update size metadata only.
-            self.inode.set_size_in_bytes(new_size);
-            self.inode.write(&self.fs).await
-        }
+        truncate(&self.fs, &mut self.inode, new_size).await?;
+        Ok(())
     }
 
     /// Write bytes from `buf` into the file, returning how many bytes
@@ -874,4 +816,85 @@ async fn write_at_extent(
     inode.write(ext4).await?;
 
     Ok(total_written)
+}
+
+/// Truncate `inode` to `new_size` bytes, freeing blocks as necessary.
+/// If `new_size` is larger than the current size, this just updates the size in the inode without allocating blocks
+/// and the new blocks will be allocated on demand when writing to them.
+pub async fn truncate(
+    ext4: &Ext4,
+    inode: &mut Inode,
+    new_size: u64,
+) -> Result<(), Ext4Error> {
+    let old_size = inode.size_in_bytes();
+    if new_size == old_size {
+        return Ok(());
+    }
+
+    if new_size > old_size {
+        inode.set_size_in_bytes(new_size);
+        inode.write(ext4).await?;
+    } else {
+        let block_size_nz = ext4.0.superblock.block_size().to_nz_u64();
+        let block_size_u64: u64 = block_size_nz.get();
+
+        // Compute file-block range to drop: [drop_from, old_blocks)
+        let old_blocks: u64 = old_size.div_ceil(block_size_u64);
+        let new_blocks: u64 = new_size.div_ceil(block_size_u64);
+
+        if new_blocks < old_blocks {
+            let drop_from = FileBlockIndex::try_from(new_blocks).unwrap();
+            let drop_count: u32 =
+                u32::try_from(old_blocks.checked_sub(new_blocks).unwrap())
+                    .map_err(|_| Ext4Error::FileTooLarge)?;
+
+            if inode.flags().contains(InodeFlags::EXTENTS) {
+                let mut extent_tree =
+                    file_blocks::extent_tree::ExtentTree::from_inode(
+                        ext4.clone(),
+                        inode,
+                    )?;
+                let freed = extent_tree
+                    .remove_extent_range(drop_from, drop_count)
+                    .await?;
+
+                // Persist modified extent tree in the inode before freeing blocks.
+                inode.set_inline_data(extent_tree.to_bytes()?);
+
+                for (start, len) in freed {
+                    if start == 0 || len == 0 {
+                        continue;
+                    }
+                    if let Some(nz) = NonZeroU32::new(len) {
+                        // Best-effort: contiguous free within a block group.
+                        // If this ever spans groups, free_blocks will error; fall back to single frees.
+                        if ext4.free_blocks(start, nz).await.is_err() {
+                            for i in 0..len {
+                                ext4.free_block(
+                                    start.checked_add(u64::from(i)).unwrap(),
+                                )
+                                .await?;
+                            }
+                        }
+                    }
+                }
+            } else {
+                let mut block_map =
+                    file_blocks::block_map::BlockMap::from_inode(inode);
+                let freed = block_map.remove_range(drop_from, drop_count)?;
+                inode.set_inline_data(block_map.to_bytes());
+                for blk in freed {
+                    if blk != 0 {
+                        ext4.free_block(blk).await?;
+                    }
+                }
+            }
+        }
+
+        // Update size last.
+        inode.set_size_in_bytes(new_size);
+        inode.write(ext4).await?;
+    }
+
+    Ok(())
 }

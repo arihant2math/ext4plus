@@ -947,12 +947,76 @@ impl ExtentTree {
 
     /// Remove all extents that overlap file-block range [start, start+num_blocks)
     /// and return any freed FsBlockIndex ranges (so caller can free blocks).
-    async fn remove_extent_range(
+    pub(crate) async fn remove_extent_range(
         &mut self,
         start: FileBlockIndex,
         num_blocks: u32,
     ) -> Result<Vec<(FsBlockIndex, u32)>, Ext4Error> {
-        todo!()
+        if num_blocks == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Ensure the range boundaries align with extent boundaries so we can
+        // remove whole extents safely.
+        let end = start.checked_add(num_blocks).ok_or(Ext4Error::NoSpace)?;
+        // Splitting at `start` is needed if we’re removing from the middle of an extent.
+        // Splitting at `end` is needed if we’re removing the tail of an extent.
+        // If there is no extent at those positions, split is a no-op.
+        let _ = self.split_extent_at(start).await;
+        let _ = self.split_extent_at(end).await;
+
+        // Current implementation supports the inline root leaf case, which is
+        // what this crate currently constructs (max_entries=4, depth=0).
+        if self.node.header.depth != 0 {
+            // Conservative: avoid corrupting on-disk structures until full tree
+            // editing supports internal nodes.
+            todo!("remove_extent_range for non-leaf extent trees");
+        }
+
+        let ExtentNodeEntries::Leaf(extents) = &mut self.node.entries else {
+            unreachable!();
+        };
+
+        let mut freed: Vec<(FsBlockIndex, u32)> = Vec::new();
+
+        // Remove any extents that overlap [start, end).
+        let mut i = 0usize;
+        while i < extents.len() {
+            let e = extents[i];
+            let e_start = e.block_within_file;
+            let e_end = e_start
+                .checked_add(FileBlockIndex::from(e.num_blocks))
+                .unwrap();
+
+            let overlaps = e_start < end && e_end > start;
+            if overlaps {
+                // After splitting above, any overlap should be full containment.
+                // Still be defensive: compute the intersection and only free that.
+                let inter_start = core::cmp::max(e_start, start);
+                let inter_end = core::cmp::min(e_end, end);
+                let inter_len = inter_end.checked_sub(inter_start).unwrap();
+                if inter_len > 0 {
+                    let phys_start = e
+                        .start_block
+                        .checked_add(FsBlockIndex::from(
+                            inter_start.checked_sub(e_start).unwrap(),
+                        ))
+                        .unwrap();
+                    freed.push((phys_start, inter_len));
+                }
+
+                // If the whole extent lies inside the removal range, drop it.
+                // With boundary splits, that should be the common case.
+                if e_start >= start && e_end <= end {
+                    extents.remove(i);
+                    continue;
+                }
+            }
+            i = i.checked_add(1).unwrap();
+        }
+
+        self.node.header.num_entries = u16::try_from(extents.len()).unwrap();
+        Ok(freed)
     }
 
     /// Split an existing extent so that there's a boundary at `split_block_within_file`.
