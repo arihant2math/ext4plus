@@ -2,18 +2,17 @@
 
 ## [Unreleased]
 
+## 0.1.0-alpha.4
+
 - BREAKING: Removes `Ext4::link` and `Ext4::unlink`. These are superseded by `Dir::link` and `Dir::unlink`, which allow
   for any valid byte string to be a dirname, instead of just valid UTF-8.
 - BREAKING: Can no longer open irregular files as `File`.
-- Fix incorrect checksum updating when initializing directory, leading to the last entry being reported as corrupted.
-- Fix inode size not being updated when writing to block map files
-
-## 0.1.0-alpha.3
-
+- BREAKING: Fix incorrect checksum updating when initializing directory, leading to the last entry being reported as corrupted.
 - `File::truncate` now can be used beyond block boundaries, and will zero out new blocks as needed.
 - Add `truncate` function for `File::truncate` without a file struct.
 - Fix post-write position update in `File::write`
 - Expose `Dir` object, which is like `File`. De-exposes `get_dir_entry_inode_by_name` and `init_directory`, these can be done by `Directory` instead.
+- Fix inode size not being updated when writing to block map files
 - Bump MSRV to 1.86
 
 ## 0.1.0-alpha.2
