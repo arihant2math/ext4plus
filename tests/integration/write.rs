@@ -7,8 +7,8 @@
 // except according to those terms.
 
 use ext4plus::{
-    Ext4Error, File, FileType, FollowSymlinks, Inode, InodeCreationOptions,
-    InodeFlags, InodeMode, Path, truncate, write_at,
+    AsyncIterator, Ext4Error, File, FileType, FollowSymlinks, Inode,
+    InodeCreationOptions, InodeFlags, InodeMode, Path, truncate, write_at,
 };
 use tokio;
 
@@ -355,6 +355,10 @@ async fn test_init_directory_creates_dot_and_dotdot() {
         .await
         .unwrap();
     assert_eq!(dotdot.index, root.index);
+    for i in dir_inode.read_dir().unwrap().collect().await {
+        i.unwrap();
+    }
+    assert_eq!(dir_inode.read_dir().unwrap().collect().await.len(), 2);
 }
 
 #[tokio::test]

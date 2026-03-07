@@ -382,17 +382,24 @@ pub(crate) async fn init_directory(
         FileType::Directory,
     )?;
 
-    // Update the checksum tail (stored in the last 4 bytes) if enabled.
-    DirBlock {
-        fs,
-        // Not used by update_checksum; set a dummy value.
-        block_index: 0,
-        is_first: true,
-        dir_inode: dir_inode.index,
-        has_htree: false,
-        checksum_base: dir_inode.checksum_base().clone(),
+    // Write checksum dir entry if needed.
+    if fs.has_metadata_checksums() {
+        let checksum_start = block_size.checked_sub(12).unwrap();
+        write_u32le(&mut block_buf, checksum_start, 0);
+        write_u32le(&mut block_buf, checksum_start.checked_add(4).unwrap(), 12);
+        // TODO: Cleanup
+        // Update the checksum tail (stored in the last 4 bytes) if enabled.
+        DirBlock {
+            fs,
+            // Not used by update_checksum; set a dummy value.
+            block_index: 0,
+            is_first: true,
+            dir_inode: dir_inode.index,
+            has_htree: false,
+            checksum_base: dir_inode.checksum_base().clone(),
+        }
+        .update_checksum(&mut block_buf)?;
     }
-    .update_checksum(&mut block_buf)?;
 
     // Persist: write_at will allocate blocks and update inode size/extent tree.
     let n = write_at(fs, dir_inode, &block_buf, 0).await?;

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fix incorrect checksum updating when initializing directory, leading to the last entry being reported as corrupted.
+
 ## 0.1.0-alpha.3
 
 - `File::truncate` now can be used beyond block boundaries, and will zero out new blocks as needed.
