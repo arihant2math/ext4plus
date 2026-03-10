@@ -323,7 +323,7 @@ async fn write_at_block_map(
             0 => {
                 // Hole: need to allocate a block.
                 let new_fs_block = ext4.alloc_block(inode.index).await?;
-                block_map.set_block(start_block, new_fs_block);
+                block_map.set_block(start_block, new_fs_block).await?;
                 inode.set_inline_data(block_map.to_bytes());
                 inode.write(ext4).await?;
                 new_fs_block
@@ -356,7 +356,7 @@ async fn write_at_block_map(
                 block_map.set_block(
                     start_block.checked_add(1).unwrap(),
                     new_fs_block,
-                );
+                ).await?;
                 inode.set_inline_data(block_map.to_bytes());
                 inode.write(ext4).await?;
                 new_fs_block
