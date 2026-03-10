@@ -533,6 +533,28 @@ impl Ext4 {
                 self.update_inode_bitmap_checksum(bg_id, inode_bitmap_handle)
                     .await?;
                 bg.set_free_inodes_count(free_inodes.checked_sub(1).unwrap());
+                if self
+                    .0
+                    .superblock
+                    .inodes_per_block_group()
+                    .get()
+                    .checked_sub(bg.unused_inodes_count())
+                    .unwrap()
+                    .checked_sub(1)
+                    .unwrap()
+                    <= inode_num
+                {
+                    bg.set_unused_inodes_count(
+                        self.0
+                            .superblock
+                            .inodes_per_block_group()
+                            .get()
+                            .checked_sub(inode_num)
+                            .unwrap()
+                            .checked_sub(1)
+                            .unwrap(),
+                    );
+                }
 
                 if matches!(inode_type, FileType::Directory) {
                     bg.set_used_dirs_count(used_dirs.saturating_add(1));
