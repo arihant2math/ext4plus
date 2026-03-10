@@ -312,6 +312,9 @@ async fn write_at_block_map(
                 // Hole: need to allocate a block.
                 let new_fs_block = ext4.alloc_block(inode.index).await?;
                 block_map.set_block(start_block, new_fs_block).await?;
+                inode.set_blocks(
+                    inode.blocks().checked_add(1).unwrap(),
+                );
                 inode.set_inline_data(block_map.to_bytes());
                 inode.write(ext4).await?;
                 new_fs_block
@@ -347,6 +350,9 @@ async fn write_at_block_map(
                         new_fs_block,
                     )
                     .await?;
+                inode.set_blocks(
+                    inode.blocks().checked_add(1).unwrap(),
+                );
                 inode.set_inline_data(block_map.to_bytes());
                 inode.write(ext4).await?;
                 new_fs_block
@@ -771,6 +777,9 @@ async fn write_at_extent(
                     u16::try_from(tried_blocks).unwrap(),
                 );
                 extent_tree.insert_extent(new_extent).await?;
+                inode.set_blocks(
+                    inode.blocks().checked_add(u64_from_usize(tried_blocks)).unwrap(),
+                );
                 // Write data into the newly allocated blocks (same logic as initialized extents except we don't need to read old content)
                 // If first or last block is partial, zero the unwritten parts.
                 let want_bytes = bytes_for_blocks(
