@@ -133,12 +133,32 @@ bitflags! {
     }
 }
 
-fn timestamp_to_duration(timestamp: u32, _high: Option<u32>) -> Duration {
-    if timestamp == u32::MAX {
-        panic!("timestamp overflow");
+fn timestamp_to_duration(timestamp: u32, high: Option<u32>) -> Duration {
+    if let Some(high) = high {
+        // Low 2 bits of `high` are the high 2 bits of the timestamp, and the rest of `high` is for nanosecond precision
+        let timestamp_high = high & 0b11;
+        let timestamp =
+            ((u64::from(timestamp_high)) << 32) | u64::from(timestamp);
+        Duration::new(timestamp, high >> 2)
+    } else {
+        Duration::from_secs(u64::from(timestamp))
     }
-    // TODO: nanosecond precision
-    Duration::from_secs(u64::from(timestamp))
+}
+
+fn duration_to_timestamp(duration: Duration) -> (u32, Option<u32>) {
+    let timestamp = duration.as_secs();
+    if timestamp > u64::from(u32::MAX) {
+        // Need to use the high bits field.
+        #[expect(clippy::as_conversions)]
+        let timestamp_high = (timestamp >> 32) as u32;
+        #[expect(clippy::as_conversions)]
+        let timestamp_low = timestamp as u32;
+        let high = (timestamp_high & 0b11) | (duration.subsec_nanos() << 2);
+        (timestamp_low, Some(high))
+    } else {
+        // Can fit in the low field alone.
+        (u32::try_from(timestamp).unwrap(), None)
+    }
 }
 
 /// An inode within an Ext4 filesystem.
@@ -520,39 +540,69 @@ impl Inode {
     #[must_use]
     pub fn atime(&self) -> Duration {
         let i_atime = read_u32le(&self.inode_data, 0x8);
-        timestamp_to_duration(i_atime, None)
+        let i_atime_extra = if self.inode_data.len() >= 0x8C + 4 {
+            Some(read_u32le(&self.inode_data, 0x8C))
+        } else {
+            None
+        };
+        timestamp_to_duration(i_atime, i_atime_extra)
     }
 
     /// Set the inode's access time.
     pub fn set_atime(&mut self, atime: Duration) {
-        let i_atime = atime.as_secs().try_into().unwrap_or(u32::MAX);
+        let (i_atime, i_atime_extra) = duration_to_timestamp(atime);
         write_u32le(&mut self.inode_data, 0x8, i_atime);
+        if let Some(i_atime_extra) = i_atime_extra {
+            if self.inode_data.len() >= 0x8C + 4 {
+                write_u32le(&mut self.inode_data, 0x8C, i_atime_extra);
+            }
+        }
     }
 
     /// Get the inode's creation time.
     #[must_use]
     pub fn ctime(&self) -> Duration {
         let i_ctime = read_u32le(&self.inode_data, 0xc);
-        timestamp_to_duration(i_ctime, None)
+        let i_ctime_extra = if self.inode_data.len() >= 0x84 + 4 {
+            Some(read_u32le(&self.inode_data, 0x84))
+        } else {
+            None
+        };
+        timestamp_to_duration(i_ctime, i_ctime_extra)
     }
 
     /// Set the inode's creation time.
     pub fn set_ctime(&mut self, ctime: Duration) {
-        let i_ctime = ctime.as_secs().try_into().unwrap_or(u32::MAX);
+        let (i_ctime, i_ctime_extra) = duration_to_timestamp(ctime);
         write_u32le(&mut self.inode_data, 0xc, i_ctime);
+        if let Some(i_ctime_extra) = i_ctime_extra {
+            if self.inode_data.len() >= 0x84 + 4 {
+                write_u32le(&mut self.inode_data, 0x84, i_ctime_extra);
+            }
+        }
     }
 
     /// Get the inode's modification time.
     #[must_use]
     pub fn mtime(&self) -> Duration {
         let i_mtime = read_u32le(&self.inode_data, 0x10);
-        timestamp_to_duration(i_mtime, None)
+        let i_mtime_extra = if self.inode_data.len() >= 0x88 + 4 {
+            Some(read_u32le(&self.inode_data, 0x88))
+        } else {
+            None
+        };
+        timestamp_to_duration(i_mtime, i_mtime_extra)
     }
 
     /// Set the inode's modification time.
     pub fn set_mtime(&mut self, mtime: Duration) {
-        let i_mtime = mtime.as_secs().try_into().unwrap_or(u32::MAX);
+        let (i_mtime, i_mtime_extra) = duration_to_timestamp(mtime);
         write_u32le(&mut self.inode_data, 0x10, i_mtime);
+        if let Some(i_mtime_extra) = i_mtime_extra {
+            if self.inode_data.len() >= 0x88 + 4 {
+                write_u32le(&mut self.inode_data, 0x88, i_mtime_extra);
+            }
+        }
     }
 
     /// Get the inode's delete time.
@@ -594,6 +644,21 @@ impl Inode {
         let i_size_high = read_u32le(&self.inode_data, 0x6c);
         let l_i_uid_high = read_u16le(&self.inode_data, 0x74 + 0x4);
         let l_i_gid_high = read_u16le(&self.inode_data, 0x74 + 0x6);
+        let i_ctime_extra = if self.inode_data.len() >= 0x84 + 4 {
+            Some(read_u32le(&self.inode_data, 0x84))
+        } else {
+            None
+        };
+        let i_mtime_extra = if self.inode_data.len() >= 0x88 + 4 {
+            Some(read_u32le(&self.inode_data, 0x88))
+        } else {
+            None
+        };
+        let i_atime_extra = if self.inode_data.len() >= 0x8C + 4 {
+            Some(read_u32le(&self.inode_data, 0x8C))
+        } else {
+            None
+        };
         let size_in_bytes = u64_from_hilo(i_size_high, i_size_lo);
         let uid = u32_from_hilo(l_i_uid_high, i_uid);
         let gid = u32_from_hilo(l_i_gid_high, i_gid);
@@ -604,11 +669,11 @@ impl Inode {
             mode,
             uid,
             gid,
-            atime: timestamp_to_duration(i_atime, None),
-            ctime: timestamp_to_duration(i_ctime, None),
+            atime: timestamp_to_duration(i_atime, i_atime_extra),
+            ctime: timestamp_to_duration(i_ctime, i_ctime_extra),
             dtime: timestamp_to_duration(i_dtime, None),
             file_type: self.file_type,
-            mtime: timestamp_to_duration(i_mtime, None),
+            mtime: timestamp_to_duration(i_mtime, i_mtime_extra),
             links_count: i_links_count,
         }
     }

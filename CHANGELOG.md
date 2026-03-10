@@ -5,6 +5,7 @@
 - BREAKING: `Dir` now uses `inode()` and `inode_mut()` instead of `AsRef` and `AsMut` for consistent API with `File`.
 - `Dir::open` (deprecated for now) has become `Dir::open_inode`
 - Remove all restrictions on block map writing, allowing writing to block maps even with indirect blocks.
+- Support extra 2 bits for seconds in timestamp to avoid Y2038 problem as well as nanosecond precision.
 
 ## 0.1.0-alpha.3
 
