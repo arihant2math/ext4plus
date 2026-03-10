@@ -4,6 +4,7 @@
 
 - BREAKING: `Dir` now uses `inode()` and `inode_mut()` instead of `AsRef` and `AsMut` for consistent API with `File`.
 - `Dir::open` (deprecated for now) has become `Dir::open_inode`
+- Expose `Inode::blocks` and `Inode::set_blocks`.
 - Remove all restrictions on block map writing, allowing writing to block maps even with indirect blocks.
 - Support extra 2 bits for seconds in timestamp to avoid Y2038 problem as well as nanosecond precision.
 - Fix unused_inodes_count not being updated when allocated inodes, leading to inodes possibly being overwritten by other drivers.

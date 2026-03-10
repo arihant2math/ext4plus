@@ -538,6 +538,21 @@ impl Inode {
         write_u32le(&mut self.inode_data, 0x6c, i_size_high);
     }
 
+    /// Get the number of blocks allocated to the inode.
+    #[must_use]
+    pub fn blocks(&self) -> u64 {
+        let i_blocks_lo = read_u32le(&self.inode_data, 0x1c);
+        let i_blocks_high = read_u32le(&self.inode_data, 0x74);
+        u64_from_hilo(i_blocks_high, i_blocks_lo)
+    }
+
+    /// Set the number of blocks allocated to the inode.
+    pub fn set_blocks(&mut self, blocks: u64) {
+        let (i_blocks_high, i_blocks_lo) = u64_to_hilo(blocks);
+        write_u32le(&mut self.inode_data, 0x1c, i_blocks_lo);
+        write_u32le(&mut self.inode_data, 0x74, i_blocks_high);
+    }
+
     /// Get the inode's access time.
     #[must_use]
     pub fn atime(&self) -> Duration {
@@ -629,49 +644,17 @@ impl Inode {
     /// Get the inode's metadata.
     #[must_use]
     pub fn metadata(&self) -> Metadata {
-        let i_mode = read_u16le(&self.inode_data, 0x0);
-        let i_uid = read_u16le(&self.inode_data, 0x2);
-        let i_size_lo = read_u32le(&self.inode_data, 0x4);
-        let i_atime = read_u32le(&self.inode_data, 0x8);
-        let i_ctime = read_u32le(&self.inode_data, 0xc);
-        let i_mtime = read_u32le(&self.inode_data, 0x10);
-        let i_dtime = read_u32le(&self.inode_data, 0x14);
-        let i_gid = read_u16le(&self.inode_data, 0x18);
-        let i_links_count = read_u16le(&self.inode_data, 0x1a);
-        let i_size_high = read_u32le(&self.inode_data, 0x6c);
-        let l_i_uid_high = read_u16le(&self.inode_data, 0x74 + 0x4);
-        let l_i_gid_high = read_u16le(&self.inode_data, 0x74 + 0x6);
-        let i_ctime_extra = if self.inode_data.len() >= 0x84 + 4 {
-            Some(read_u32le(&self.inode_data, 0x84))
-        } else {
-            None
-        };
-        let i_mtime_extra = if self.inode_data.len() >= 0x88 + 4 {
-            Some(read_u32le(&self.inode_data, 0x88))
-        } else {
-            None
-        };
-        let i_atime_extra = if self.inode_data.len() >= 0x8C + 4 {
-            Some(read_u32le(&self.inode_data, 0x8C))
-        } else {
-            None
-        };
-        let size_in_bytes = u64_from_hilo(i_size_high, i_size_lo);
-        let uid = u32_from_hilo(l_i_uid_high, i_uid);
-        let gid = u32_from_hilo(l_i_gid_high, i_gid);
-        let mode = InodeMode::from_bits_retain(i_mode);
-
         Metadata {
-            size_in_bytes,
-            mode,
-            uid,
-            gid,
-            atime: timestamp_to_duration(i_atime, i_atime_extra),
-            ctime: timestamp_to_duration(i_ctime, i_ctime_extra),
-            dtime: timestamp_to_duration(i_dtime, None),
+            size_in_bytes: self.size_in_bytes(),
+            mode: self.mode(),
+            uid: self.uid(),
+            gid: self.gid(),
+            atime: self.atime(),
+            ctime: self.ctime(),
+            dtime: self.dtime(),
             file_type: self.file_type,
-            mtime: timestamp_to_duration(i_mtime, i_mtime_extra),
-            links_count: i_links_count,
+            mtime: self.mtime(),
+            links_count: self.links_count(),
         }
     }
 
