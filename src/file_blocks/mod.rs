@@ -54,7 +54,7 @@ impl FileBlocks {
             Self::ExtentTree(extent_tree) => {
                 extent_tree.get_block(block_index).await
             }
-            Self::BlockMap(block_map) => block_map.get_block(block_index),
+            Self::BlockMap(block_map) => block_map.get_block(block_index).await,
         }
     }
 }
