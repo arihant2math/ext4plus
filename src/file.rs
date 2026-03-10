@@ -78,105 +78,34 @@ impl File {
     /// Returns `Ok(0)` if the end of the file has been reached.
     pub async fn read_bytes(
         &mut self,
-        mut buf: &mut [u8],
+        buf: &mut [u8],
     ) -> Result<usize, Ext4Error> {
-        // Nothing to do if output buffer is empty.
-        if buf.is_empty() {
-            return Ok(0);
-        }
-
-        // Nothing to do if already at the end of the file.
-        if self.position >= self.inode.size_in_bytes() {
-            return Ok(0);
-        }
-
-        // Get the number of bytes remaining in the file, starting from
-        // the current `position`.
-        //
-        // OK to unwrap: just checked that `position` is less than the
-        // file size.
-        let bytes_remaining = self
-            .inode
-            .metadata()
-            .size_in_bytes
-            .checked_sub(self.position)
-            .unwrap();
-
-        // If the the number of bytes remaining is less than the output
-        // buffer length, shrink the buffer.
-        //
-        // If the conversion to `usize` fails, the output buffer is
-        // definitely not larger than the remaining bytes to read.
-        if let Ok(bytes_remaining) = usize::try_from(bytes_remaining) {
-            if buf.len() > bytes_remaining {
-                buf = &mut buf[..bytes_remaining];
-            }
-        }
-
-        let block_size = self.fs.0.superblock.block_size();
-
-        // Byte offset within the current block.
-        //
-        // OK to unwrap: block size fits in a `u32`, so an offset within
-        // the block will as well.
-        let offset_within_block: u32 =
-            u32::try_from(self.position % block_size.to_nz_u64()).unwrap();
-
-        // OK to unwrap: `offset_within_block` is always less than or
-        // equal to the block length.
-        //
-        // Note that if this block is at the end of the file, the block
-        // may extend past the actual number of bytes in the file. This
-        // does not matter because the output buffer's length was
-        // already capped earlier against the number of bytes remaining
-        // in the file.
-        let bytes_remaining_in_block: u32 = block_size
-            .to_u32()
-            .checked_sub(offset_within_block)
-            .unwrap();
-
-        // If the output buffer is larger than the number of bytes
-        // remaining in the block, shink the buffer.
-        if buf.len() > usize_from_u32(bytes_remaining_in_block) {
-            buf = &mut buf[..usize_from_u32(bytes_remaining_in_block)];
-        }
-
-        // OK to unwrap: the buffer length has been capped so that it
-        // cannot be larger than the block size, and the block size fits
-        // in a `u32`.
-        let buf_len_u32: u32 = buf.len().try_into().unwrap();
-
-        // Read the block data, or zeros if in a hole.
-        let block_index = self
-            .file_blocks
-            .get_block(
-                FileBlockIndex::try_from(
-                    self.position / block_size.to_nz_u64(),
-                )
-                .unwrap(),
-            )
-            .await?;
-        if block_index == 0 {
-            buf.fill(0);
-        } else {
-            self.fs
-                .read_from_block(block_index, offset_within_block, buf)
-                .await?;
-        }
-
+        let bytes_read = read_at_inner(
+            &self.fs,
+            &self.inode,
+            &self.file_blocks,
+            buf,
+            self.position,
+        )
+        .await?;
         // OK to unwrap: the buffer length is capped such that this
         // calculation is at most the length of the file, which fits in
         // a `u64`.
-        self.position =
-            self.position.checked_add(u64::from(buf_len_u32)).unwrap();
-
-        Ok(buf.len())
+        self.position = self
+            .position
+            .checked_add(u64_from_usize(bytes_read))
+            .unwrap();
+        Ok(bytes_read)
     }
 
-    /// Truncate the file to `new_size` bytes.
-    pub async fn truncate(&mut self, new_size: u64) -> Result<(), Ext4Error> {
-        truncate(&self.fs, &mut self.inode, new_size).await?;
-        Ok(())
+    /// Read bytes from the file at position `pos` into `buf`, returning how many bytes were read. The number may be smaller than the length of the input buffer.
+    /// This does not change the position of the file.
+    pub async fn read_bytes_at(
+        &mut self,
+        buf: &mut [u8],
+        pos: u64,
+    ) -> Result<usize, Ext4Error> {
+        read_at_inner(&self.fs, &self.inode, &self.file_blocks, buf, pos).await
     }
 
     /// Write bytes from `buf` into the file, returning how many bytes
@@ -195,6 +124,23 @@ impl File {
         // Update file blocks to reflect any changes from the write (e.g., new blocks allocated, extents split/merged, etc.).
         self.seek_to(self.position).await?;
         Ok(written)
+    }
+
+    /// Write bytes from `buf` into the file at position `pos`, returning how many bytes
+    /// were written. The number may be smaller than the length of the
+    /// input buffer.
+    pub async fn write_bytes_at(
+        &mut self,
+        buf: &[u8],
+        pos: u64,
+    ) -> Result<usize, Ext4Error> {
+        write_at(&self.fs, &mut self.inode, buf, pos).await
+    }
+
+    /// Truncate the file to `new_size` bytes.
+    pub async fn truncate(&mut self, new_size: u64) -> Result<(), Ext4Error> {
+        truncate(&self.fs, &mut self.inode, new_size).await?;
+        Ok(())
     }
 
     /// Current position within the file.
@@ -234,16 +180,96 @@ impl Debug for File {
 
 /// Read from `inode` into `buf` starting at `offset`, returning how many bytes were read.
 /// The number may be smaller than the length of the input buffer if the read is only partially successful (e.g., due to reaching EOF).
+pub(crate) async fn read_at_inner(
+    ext4: &Ext4,
+    inode: &Inode,
+    file_blocks: &FileBlocks,
+    mut buf: &mut [u8],
+    offset: u64,
+) -> Result<usize, Ext4Error> {
+    // Nothing to do if output buffer is empty.
+    if buf.is_empty() {
+        return Ok(0);
+    }
+
+    // Nothing to do if already at the end of the file.
+    if offset >= inode.size_in_bytes() {
+        return Ok(0);
+    }
+
+    // Get the number of bytes remaining in the file, starting from
+    // the current `position`.
+    //
+    // OK to unwrap: just checked that `position` is less than the
+    // file size.
+    let bytes_remaining =
+        inode.metadata().size_in_bytes.checked_sub(offset).unwrap();
+
+    // If the the number of bytes remaining is less than the output
+    // buffer length, shrink the buffer.
+    //
+    // If the conversion to `usize` fails, the output buffer is
+    // definitely not larger than the remaining bytes to read.
+    if let Ok(bytes_remaining) = usize::try_from(bytes_remaining) {
+        if buf.len() > bytes_remaining {
+            buf = &mut buf[..bytes_remaining];
+        }
+    }
+
+    let block_size = ext4.0.superblock.block_size();
+
+    // Byte offset within the current block.
+    //
+    // OK to unwrap: block size fits in a `u32`, so an offset within
+    // the block will as well.
+    let offset_within_block: u32 =
+        u32::try_from(offset % block_size.to_nz_u64()).unwrap();
+
+    // OK to unwrap: `offset_within_block` is always less than or
+    // equal to the block length.
+    //
+    // Note that if this block is at the end of the file, the block
+    // may extend past the actual number of bytes in the file. This
+    // does not matter because the output buffer's length was
+    // already capped earlier against the number of bytes remaining
+    // in the file.
+    let bytes_remaining_in_block: u32 = block_size
+        .to_u32()
+        .checked_sub(offset_within_block)
+        .unwrap();
+
+    // If the output buffer is larger than the number of bytes
+    // remaining in the block, shink the buffer.
+    if buf.len() > usize_from_u32(bytes_remaining_in_block) {
+        buf = &mut buf[..usize_from_u32(bytes_remaining_in_block)];
+    }
+
+    // Read the block data, or zeros if in a hole.
+    let block_index = file_blocks
+        .get_block(
+            FileBlockIndex::try_from(offset / block_size.to_nz_u64()).unwrap(),
+        )
+        .await?;
+    if block_index == 0 {
+        buf.fill(0);
+    } else {
+        ext4.read_from_block(block_index, offset_within_block, buf)
+            .await?;
+    }
+
+    Ok(buf.len())
+}
+
+/// Read from `inode` into `buf` starting at `offset`, returning how many bytes were read.
+/// The number may be smaller than the length of the input buffer if the read is only partially successful (e.g., due to reaching EOF).
 pub async fn read_at(
     ext4: &Ext4,
     inode: &Inode,
     buf: &mut [u8],
     offset: u64,
 ) -> Result<usize, Ext4Error> {
-    // Open the file and seek to the desired offset, then read into the buffer.
-    let mut file = File::open_inode(ext4, inode.clone())?;
-    file.seek_to(offset).await?;
-    file.read_bytes(buf).await
+    let file_blocks = FileBlocks::from_inode(inode, ext4.clone())?;
+    read_at_inner(ext4, inode, &file_blocks, buf, offset).await
 }
 
 /// Write `buf` into `inode` starting at `offset`, returning how many bytes were written.
