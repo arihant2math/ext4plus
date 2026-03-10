@@ -904,7 +904,7 @@ pub async fn truncate(
                         inode,
                         ext4.clone(),
                     );
-                let freed = block_map.remove_range(drop_from, drop_count)?;
+                let freed = block_map.remove_range(drop_from, drop_count).await?;
                 inode.set_inline_data(block_map.to_bytes());
                 for blk in freed {
                     if blk != 0 {

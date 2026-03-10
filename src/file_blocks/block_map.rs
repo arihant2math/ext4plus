@@ -285,8 +285,8 @@ impl BlockMap {
     }
 
     /// Clear a range of file blocks from the mapping and return the corresponding
-    /// allocated filesystem blocks (non-zero only).
-    pub(crate) fn remove_range(
+    /// allocated filesystem blocks that were removed.
+    pub(crate) async fn remove_range(
         &mut self,
         start: FileBlockIndex,
         count: u32,
@@ -295,21 +295,18 @@ impl BlockMap {
             return Ok(Vec::new());
         }
 
-        let start_usize = usize_from_u32(start);
-        let end_usize = start_usize.checked_add(usize_from_u32(count)).unwrap();
+        let end_usize = start.checked_add(count).unwrap();
+        let mut removed_blocks = Vec::with_capacity(usize_from_u32(count));
 
-        if end_usize <= DIRECT_BLOCKS {
-            let mut freed = Vec::new();
-            for i in start_usize..end_usize {
-                let blk = self.direct_blocks[i];
-                if blk != 0 {
-                    freed.push(u64::from(blk));
-                    self.direct_blocks[i] = 0;
-                }
+        for i in start..end_usize {
+            let block = self
+                .get_block(FileBlockIndex::try_from(i).unwrap())
+                .await?;
+            if block != 0 {
+                removed_blocks.push(block);
             }
-            Ok(freed)
-        } else {
-            todo!("truncate/shrink for indirect blocks")
+            self.set_block(FileBlockIndex::try_from(i).unwrap(), 0);
         }
+        Ok(removed_blocks)
     }
 }
