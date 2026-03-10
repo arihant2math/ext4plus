@@ -147,16 +147,18 @@ fn timestamp_to_duration(timestamp: u32, high: Option<u32>) -> Duration {
 
 fn duration_to_timestamp(duration: Duration) -> (u32, Option<u32>) {
     let timestamp = duration.as_secs();
-    if timestamp > u64::from(u32::MAX) {
-        // Need to use the high bits field.
+    // ext4 encodes nanoseconds in the upper 30 bits of the "extra" field.
+    // Duration guarantees subsec_nanos < 1e9, but clamp defensively anyway.
+    let nanos = duration.subsec_nanos().min(999_999_999);
+
+    if timestamp > u64::from(u32::MAX) || nanos != 0 {
         #[expect(clippy::as_conversions)]
         let timestamp_high = (timestamp >> 32) as u32;
         #[expect(clippy::as_conversions)]
         let timestamp_low = timestamp as u32;
-        let high = (timestamp_high & 0b11) | (duration.subsec_nanos() << 2);
+        let high = (timestamp_high & 0b11) | (nanos << 2);
         (timestamp_low, Some(high))
     } else {
-        // Can fit in the low field alone.
         (u32::try_from(timestamp).unwrap(), None)
     }
 }
@@ -552,10 +554,9 @@ impl Inode {
     pub fn set_atime(&mut self, atime: Duration) {
         let (i_atime, i_atime_extra) = duration_to_timestamp(atime);
         write_u32le(&mut self.inode_data, 0x8, i_atime);
-        if let Some(i_atime_extra) = i_atime_extra {
-            if self.inode_data.len() >= 0x8C + 4 {
-                write_u32le(&mut self.inode_data, 0x8C, i_atime_extra);
-            }
+        if self.inode_data.len() >= 0x8C + 4 {
+            // Always write the extra field so old values don't leak.
+            write_u32le(&mut self.inode_data, 0x8C, i_atime_extra.unwrap_or(0));
         }
     }
 
@@ -575,10 +576,8 @@ impl Inode {
     pub fn set_ctime(&mut self, ctime: Duration) {
         let (i_ctime, i_ctime_extra) = duration_to_timestamp(ctime);
         write_u32le(&mut self.inode_data, 0xc, i_ctime);
-        if let Some(i_ctime_extra) = i_ctime_extra {
-            if self.inode_data.len() >= 0x84 + 4 {
-                write_u32le(&mut self.inode_data, 0x84, i_ctime_extra);
-            }
+        if self.inode_data.len() >= 0x84 + 4 {
+            write_u32le(&mut self.inode_data, 0x84, i_ctime_extra.unwrap_or(0));
         }
     }
 
@@ -598,10 +597,8 @@ impl Inode {
     pub fn set_mtime(&mut self, mtime: Duration) {
         let (i_mtime, i_mtime_extra) = duration_to_timestamp(mtime);
         write_u32le(&mut self.inode_data, 0x10, i_mtime);
-        if let Some(i_mtime_extra) = i_mtime_extra {
-            if self.inode_data.len() >= 0x88 + 4 {
-                write_u32le(&mut self.inode_data, 0x88, i_mtime_extra);
-            }
+        if self.inode_data.len() >= 0x88 + 4 {
+            write_u32le(&mut self.inode_data, 0x88, i_mtime_extra.unwrap_or(0));
         }
     }
 
