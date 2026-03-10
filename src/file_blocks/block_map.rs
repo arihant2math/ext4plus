@@ -12,6 +12,7 @@ trait BlockMapEntry {
     fn from_index(block_index: BlockIndex) -> Self;
 }
 
+#[derive(Copy, Clone, Debug)]
 struct BlockIndex(u32);
 
 impl BlockIndex {
@@ -26,6 +27,7 @@ impl BlockMapEntry for BlockIndex {
     }
 }
 
+#[derive(Copy, Clone)]
 struct IndirectBlock<T: BlockMapEntry> {
     block_index: BlockIndex,
     phantom_data: PhantomData<T>,
@@ -323,8 +325,146 @@ impl BlockMap {
                     &self.fs,
                 )
                 .await?;
+        } else if usize_from_u32(file_block_index)
+            < DIRECT_BLOCKS
+                .checked_add(blocks_per_block.get())
+                .unwrap()
+                .checked_add(
+                    blocks_per_block
+                        .checked_mul(blocks_per_block)
+                        .unwrap()
+                        .get(),
+                )
+                .unwrap()
+        {
+            let double_indirect_index = usize_from_u32(file_block_index)
+                .checked_sub(DIRECT_BLOCKS)
+                .unwrap()
+                .checked_sub(blocks_per_block.get())
+                .unwrap();
+            let first_level_index = double_indirect_index / blocks_per_block;
+            let second_level_index = double_indirect_index % blocks_per_block;
+            if self.double_indirect_block.block_index.value() == 0 {
+                let new_block_index =
+                    self.fs.alloc_block(NonZeroU32::new(1).unwrap()).await?;
+                self.double_indirect_block = IndirectBlock::new(BlockIndex(
+                    u32::try_from(new_block_index).unwrap(),
+                ));
+            }
+            let mut first_level_block = self
+                .double_indirect_block
+                .get(first_level_index, &self.fs)
+                .await?;
+            if first_level_block.block_index.value() == 0 {
+                let new_block_index =
+                    self.fs.alloc_block(NonZeroU32::new(1).unwrap()).await?;
+                first_level_block = IndirectBlock::new(BlockIndex(
+                    u32::try_from(new_block_index).unwrap(),
+                ));
+                self.double_indirect_block
+                    .set(
+                        first_level_index,
+                        first_level_block.block_index,
+                        &self.fs,
+                    )
+                    .await?;
+            }
+            first_level_block
+                .set(
+                    second_level_index,
+                    BlockIndex(u32::try_from(fs_block_index).unwrap()),
+                    &self.fs,
+                )
+                .await?;
+        } else if usize_from_u32(file_block_index)
+            < DIRECT_BLOCKS
+                .checked_add(blocks_per_block.get())
+                .unwrap()
+                .checked_add(
+                    blocks_per_block
+                        .checked_mul(blocks_per_block)
+                        .unwrap()
+                        .get(),
+                )
+                .unwrap()
+                .checked_add(
+                    blocks_per_block
+                        .checked_mul(blocks_per_block)
+                        .unwrap()
+                        .checked_mul(blocks_per_block)
+                        .unwrap()
+                        .get(),
+                )
+                .unwrap()
+        {
+            let triple_indirect_index = usize_from_u32(file_block_index)
+                .checked_sub(DIRECT_BLOCKS)
+                .unwrap()
+                .checked_sub(blocks_per_block.get())
+                .unwrap()
+                .checked_sub(
+                    blocks_per_block
+                        .checked_mul(blocks_per_block)
+                        .unwrap()
+                        .get(),
+                )
+                .unwrap();
+            let first_level_index = triple_indirect_index
+                / (blocks_per_block.checked_mul(blocks_per_block).unwrap());
+            let second_level_index =
+                (triple_indirect_index / blocks_per_block) % blocks_per_block;
+            let third_level_index = triple_indirect_index % blocks_per_block;
+            if self.triple_indirect_block.block_index.value() == 0 {
+                let new_block_index =
+                    self.fs.alloc_block(NonZeroU32::new(1).unwrap()).await?;
+                self.triple_indirect_block = IndirectBlock::new(BlockIndex(
+                    u32::try_from(new_block_index).unwrap(),
+                ));
+            }
+            let mut first_level_block = self
+                .triple_indirect_block
+                .get(first_level_index, &self.fs)
+                .await?;
+            if first_level_block.block_index.value() == 0 {
+                let new_block_index =
+                    self.fs.alloc_block(NonZeroU32::new(1).unwrap()).await?;
+                first_level_block = IndirectBlock::new(BlockIndex(
+                    u32::try_from(new_block_index).unwrap(),
+                ));
+                self.triple_indirect_block
+                    .set(
+                        first_level_index,
+                        first_level_block.block_index,
+                        &self.fs,
+                    )
+                    .await?;
+            }
+            let mut second_level_block =
+                first_level_block.get(second_level_index, &self.fs).await?;
+            if second_level_block.block_index.value() == 0 {
+                let new_block_index =
+                    self.fs.alloc_block(NonZeroU32::new(1).unwrap()).await?;
+                second_level_block = IndirectBlock::new(BlockIndex(
+                    u32::try_from(new_block_index).unwrap(),
+                ));
+                first_level_block
+                    .set(
+                        second_level_index,
+                        second_level_block.block_index,
+                        &self.fs,
+                    )
+                    .await?;
+            }
+            second_level_block
+                .set(
+                    third_level_index,
+                    BlockIndex(u32::try_from(fs_block_index).unwrap()),
+                    &self.fs,
+                )
+                .await?;
         } else {
-            todo!("Implement set_block for double/triple indirect blocks");
+            // TODO: proper error
+            return Err(Ext4Error::FileTooLarge);
         }
         Ok(())
     }
