@@ -503,3 +503,26 @@ async fn test_truncate_grow() {
         assert_eq!(&buf, data);
     }
 }
+
+#[tokio::test]
+async fn test_truncate_to_zero() {
+    let fses = [load_test_disk1_rw().await, load_ext2_rw().await];
+    for fs in fses {
+        let mut inode = fs
+            .path_to_inode(
+                "/small_file".try_into().unwrap(),
+                FollowSymlinks::All,
+            )
+            .await
+            .unwrap();
+        // Truncate the file to zero.
+        truncate(&fs, &mut inode, 0).await.unwrap();
+        // Read back the inode and verify new length.
+        let inode = Inode::read(&fs, inode.index).await.unwrap();
+        assert_eq!(inode.size_in_bytes(), 0);
+        let mut file = File::open_inode(&fs, inode).unwrap();
+        let mut buf = vec![0u8; 10];
+        let n = file.read_bytes(&mut buf).await.unwrap();
+        assert_eq!(n, 0);
+    }
+}
