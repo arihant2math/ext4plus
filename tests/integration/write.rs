@@ -339,6 +339,51 @@ async fn test_multi_block_write() {
 }
 
 #[tokio::test]
+#[ignore]
+async fn test_massive_write() {
+    // TODO: debug failure
+    let fses = [load_test_disk1_rw().await];
+    for fs in fses {
+        let mut inode = fs
+            .path_to_inode(
+                "/small_file".try_into().unwrap(),
+                FollowSymlinks::All,
+            )
+            .await
+            .unwrap();
+        // Write 8 MiB
+        for i in 0..8 {
+            let data = vec![b'B'; 1024 * 1024];
+            let mut total_written = 0;
+            while total_written < data.len() {
+                let n = write_at(
+                    &fs,
+                    &mut inode,
+                    &data[total_written..],
+                    total_written as u64 + (i * 1024 * 1024) as u64,
+                )
+                .await
+                .unwrap();
+                assert!(n > 0);
+                total_written += n;
+            }
+            assert_eq!(total_written, data.len());
+        }
+        assert_eq!(inode.size_in_bytes(), 8 * 1024 * 1024);
+        // Read back the inode and verify new length.
+        let inode = Inode::read(&fs, inode.index).await.unwrap();
+        assert_eq!(inode.size_in_bytes(), 8 * 1024 * 1024);
+        // Read last 1 MiB and verify contents.
+        let mut file = File::open_inode(&fs, inode).unwrap();
+        file.seek_to(7 * 1024 * 1024).await.unwrap();
+        let mut buf = vec![0u8; 1024 * 1024];
+        let n = file.read_bytes(&mut buf).await.unwrap();
+        assert_eq!(n, 1024 * 1024);
+        assert_eq!(&buf, &vec![b'B'; 1024 * 1024]);
+    }
+}
+
+#[tokio::test]
 async fn test_init_directory_creates_dot_and_dotdot() {
     let fses = [load_test_disk1_rw().await];
     for fs in fses {
