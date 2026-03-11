@@ -6,17 +6,17 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use super::test_util::{
+    Ext4Wrapper, load_compressed_filesystem, load_compressed_filesystem_rw,
+    load_test_disk1_rw,
+};
+use ext4plus::path::PathBuf;
 use ext4plus::prelude::{
     AsyncIterator, Dir, DirEntryName, Ext4Error, File, FileType,
     FollowSymlinks, Inode, InodeCreationOptions, InodeFlags, InodeMode, Path,
     truncate, write_at,
 };
 use tokio;
-use ext4plus::path::PathBuf;
-use super::test_util::{
-    Ext4Wrapper, load_compressed_filesystem, load_compressed_filesystem_rw,
-    load_test_disk1_rw,
-};
 
 pub async fn load_ext2_rw() -> Ext4Wrapper {
     let (fs, data) =
@@ -531,12 +531,18 @@ async fn test_truncate_to_zero() {
 async fn test_create_symlink() {
     let fses = [load_test_disk1_rw().await, load_ext2_rw().await];
     for fs in fses {
-        let root_inode = fs
-            .read_root_inode().await.unwrap();
+        let root_inode = fs.read_root_inode().await.unwrap();
         let root_dir = Dir::open_inode(&fs.0, root_inode).await.unwrap();
-        fs.symlink(&root_dir, DirEntryName::try_from(b"link_to_small").unwrap(), PathBuf::try_from("/small_file").unwrap(), 0, 0, Default::default())
-            .await
-            .unwrap();
+        fs.symlink(
+            &root_dir,
+            DirEntryName::try_from(b"link_to_small").unwrap(),
+            PathBuf::try_from("/small_file").unwrap(),
+            0,
+            0,
+            Default::default(),
+        )
+        .await
+        .unwrap();
         // Verify the symlink is visible and points to the correct target.
         let link_inode = fs
             .path_to_inode(
