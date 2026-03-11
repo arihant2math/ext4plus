@@ -8,7 +8,7 @@
 
 use crate::{capture_cmd, run_cmd, sudo};
 use anyhow::{Result, bail};
-use ext4plus::{AsyncIterator, Ext4, Ext4Error};
+use ext4plus::prelude::{AsyncIterator, Ext4, Ext4Error};
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fs::File;
@@ -98,13 +98,13 @@ async fn new_dir_entry(
 
 async fn walk_with_lib(
     fs: &Ext4,
-    path: ext4plus::Path<'_>,
+    path: ext4plus::path::Path<'_>,
 ) -> Result<Vec<WalkDirEntry>> {
     let mut output = Vec::new();
 
     let metadata = fs.symlink_metadata(path).await?;
     output.push(WalkDirEntry {
-        path: ext4plus::PathBuf::from(path).into(),
+        path: ext4plus::path::PathBuf::from(path).into(),
         content: FileContent::Dir,
         mode: metadata.mode(),
         uid: metadata.uid(),
@@ -207,7 +207,8 @@ pub async fn diff_walk(orig_path: &Path) -> Result<()> {
     let actual = {
         let ext4 = Ext4::load_from_path(&path).await?;
         let before_walk = SystemTime::now();
-        let mut paths = walk_with_lib(&ext4, ext4plus::Path::ROOT).await?;
+        let mut paths =
+            walk_with_lib(&ext4, ext4plus::path::Path::ROOT).await?;
         println!(
             "walk_with_lib took {:?}",
             SystemTime::now().duration_since(before_walk).unwrap()
