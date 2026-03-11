@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - BREAKING: Some imports have been moved to modules. Use `ext4plus::prelude` if you want to keep import compatibility.
+- Set `i_crtime` when creating inodes.
 - Fix infinite loop in block allocation logic
 - Fix large block map write failing
 

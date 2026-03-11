@@ -279,6 +279,7 @@ impl Inode {
         inode.set_ctime(inode_creation_data.time);
         inode.set_mtime(inode_creation_data.time);
         inode.set_dtime(Duration::from_secs(0));
+        inode.set_crtime(inode_creation_data.time);
         inode.set_links_count(0);
         inode.set_extra_size(0x9C + 4 - 128); // All fields up to and including i_projid
         let mut flags = inode_creation_data.flags;
