@@ -472,3 +472,31 @@ async fn test_truncate() {
         assert_eq!(&buf, data);
     }
 }
+
+#[tokio::test]
+async fn test_truncate_grow() {
+    let fses = [load_test_disk1_rw().await, load_ext2_rw().await];
+    for fs in fses {
+        let mut inode = fs
+            .path_to_inode(
+                "/small_file".try_into().unwrap(),
+                FollowSymlinks::All,
+            )
+            .await
+            .unwrap();
+        let data = b"hello, world!";
+        // Truncate the file to a larger size.
+        truncate(&fs, &mut inode, (data.len() + 5) as u64)
+            .await
+            .unwrap();
+        let data = b"hello, world!\0\0\0\0\0";
+        // Read back the inode and verify new length.
+        let inode = Inode::read(&fs, inode.index).await.unwrap();
+        assert_eq!(inode.size_in_bytes(), data.len() as u64);
+        let mut file = File::open_inode(&fs, inode).unwrap();
+        let mut buf = vec![0u8; data.len()];
+        let n = file.read_bytes(&mut buf).await.unwrap();
+        assert_eq!(n, data.len());
+        assert_eq!(&buf, data);
+    }
+}
