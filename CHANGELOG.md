@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- BREAKING: Some imports have been moved to modules. Use `ext4plus::prelude` if you want to keep import compatibility.
+
 ## 0.1.0-alpha.4
 
 - BREAKING: `Dir` now uses `inode()` and `inode_mut()` instead of `AsRef` and `AsMut` for consistent API with `File`.
