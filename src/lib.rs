@@ -165,6 +165,7 @@ use path::{Path, PathBuf};
 use superblock::Superblock;
 use util::{u64_from_usize, usize_from_u32};
 
+use crate::error::{DirOpenError, FileOpenError, FileOpenReadError, FileReadError, InodeReadError, LoadError, PathError, ResolveError};
 pub use dir_entry::{DirEntry, DirEntryName, DirEntryNameError};
 pub use features::IncompatibleFeatures;
 pub use file_type::FileType;
@@ -203,7 +204,7 @@ impl Ext4 {
     ///
     /// This reads and validates the superblock, block group
     /// descriptors, and journal. No other data is read.
-    pub async fn load(reader: Box<dyn Ext4Read>) -> Result<Self, Ext4Error> {
+    pub async fn load(reader: Box<dyn Ext4Read>) -> Result<Self, LoadError> {
         Self::load_with_writer(reader, None).await
     }
 
@@ -214,7 +215,7 @@ impl Ext4 {
     pub async fn load_with_writer(
         mut reader: Box<dyn Ext4Read>,
         writer: Option<Box<dyn Ext4Write>>,
-    ) -> Result<Self, Ext4Error> {
+    ) -> Result<Self, LoadError> {
         // The first 1024 bytes are reserved for "weird" stuff like x86
         // boot sectors.
         let superblock_start = 1024;
@@ -251,7 +252,7 @@ impl Ext4 {
     /// Load an [`Ext4`] instance from a file at the given path.
     pub async fn load_from_path<P: AsRef<std::path::Path>>(
         path: P,
-    ) -> Result<Self, Ext4Error> {
+    ) -> Result<Self, LoadError> {
         let file = std::fs::File::open(path)
             .map_err(|err| Ext4Error::Io(Box::new(err)))?;
         Self::load(Box::new(file)).await
@@ -279,7 +280,7 @@ impl Ext4 {
     }
 
     /// Read the inode of the root `/` directory.
-    pub async fn read_root_inode(&self) -> Result<Inode, Ext4Error> {
+    pub async fn read_root_inode(&self) -> Result<Inode, InodeReadError> {
         let root_inode_index = InodeIndex::new(2).unwrap();
         Inode::read(self, root_inode_index).await
     }
@@ -912,7 +913,7 @@ impl Ext4 {
     pub async fn read_inode_file(
         &self,
         inode: &Inode,
-    ) -> Result<Vec<u8>, Ext4Error> {
+    ) -> Result<Vec<u8>, FileReadError> {
         // Get the file size and initialize the output vector.
         let file_size_in_bytes = usize::try_from(inode.size_in_bytes())
             .map_err(|_| Ext4Error::FileTooLarge)?;
@@ -936,7 +937,7 @@ impl Ext4 {
         &self,
         path: Path<'_>,
         follow: FollowSymlinks,
-    ) -> Result<Inode, Ext4Error> {
+    ) -> Result<Inode, ResolveError> {
         resolve::resolve_path(self, path, follow).await.map(|v| v.0)
     }
 
@@ -997,11 +998,11 @@ impl Ext4 {
     pub async fn canonicalize<'p, P>(
         &self,
         path: P,
-    ) -> Result<PathBuf, Ext4Error>
+    ) -> Result<PathBuf, ResolveError>
     where
         P: TryInto<Path<'p>>,
     {
-        let path = path.try_into().map_err(|_| Ext4Error::MalformedPath)?;
+        let path = path.try_into().map_err(|_| PathError::MalformedPath)?;
         resolve::resolve_path(self, path, FollowSymlinks::All)
             .await
             .map(|v| v.1)
@@ -1018,7 +1019,7 @@ impl Ext4 {
     ///
     /// This is not an exhaustive list of errors, see the
     /// [crate documentation](crate#errors).
-    pub async fn open<'p, P>(&self, path: P) -> Result<File, Ext4Error>
+    pub async fn open<'p, P>(&self, path: P) -> Result<File, FileOpenError>
     where
         P: TryInto<Path<'p>>,
     {
@@ -1037,24 +1038,24 @@ impl Ext4 {
     ///
     /// This is not an exhaustive list of errors, see the
     /// [crate documentation](crate#errors).
-    pub async fn read<'p, P>(&self, path: P) -> Result<Vec<u8>, Ext4Error>
+    pub async fn read<'p, P>(&self, path: P) -> Result<Vec<u8>, FileOpenReadError>
     where
         P: TryInto<Path<'p>>,
     {
         async fn inner(
             fs: &Ext4,
             path: Path<'_>,
-        ) -> Result<Vec<u8>, Ext4Error> {
+        ) -> Result<Vec<u8>, FileOpenReadError> {
             let inode = fs.path_to_inode(path, FollowSymlinks::All).await?;
 
             if inode.file_type().is_dir() {
-                return Err(Ext4Error::IsADirectory);
+                return Err(Ext4Error::IsADirectory)?;
             }
             if !inode.file_type().is_regular_file() {
-                return Err(Ext4Error::IsASpecialFile);
+                return Err(Ext4Error::IsASpecialFile)?;
             }
 
-            fs.read_inode_file(&inode).await
+            Ok(fs.read_inode_file(&inode).await?)
         }
 
         inner(self, path.try_into().map_err(|_| Ext4Error::MalformedPath)?)
@@ -1075,13 +1076,16 @@ impl Ext4 {
     pub async fn read_to_string<'p, P>(
         &self,
         path: P,
-    ) -> Result<String, Ext4Error>
+    ) -> Result<String, FileOpenReadError>
     where
         P: TryInto<Path<'p>>,
     {
-        async fn inner(fs: &Ext4, path: Path<'_>) -> Result<String, Ext4Error> {
+        async fn inner(
+            fs: &Ext4,
+            path: Path<'_>,
+        ) -> Result<String, FileOpenReadError> {
             let content = fs.read(path).await?;
-            String::from_utf8(content).map_err(|_| Ext4Error::NotUtf8)
+            Ok(String::from_utf8(content).map_err(|_| Ext4Error::NotUtf8)?)
         }
 
         inner(self, path.try_into().map_err(|_| Ext4Error::MalformedPath)?)
@@ -1102,21 +1106,21 @@ impl Ext4 {
     ///
     /// This is not an exhaustive list of errors, see the
     /// [crate documentation](crate#errors).
-    pub async fn read_link<'p, P>(&self, path: P) -> Result<PathBuf, Ext4Error>
+    pub async fn read_link<'p, P>(&self, path: P) -> Result<PathBuf, ResolveError>
     where
         P: TryInto<Path<'p>>,
     {
         async fn inner(
             fs: &Ext4,
             path: Path<'_>,
-        ) -> Result<PathBuf, Ext4Error> {
+        ) -> Result<PathBuf, ResolveError> {
             let inode = fs
                 .path_to_inode(path, FollowSymlinks::ExcludeFinalComponent)
                 .await?;
-            inode.symlink_target(fs).await
+            Ok(inode.symlink_target(fs).await?)
         }
 
-        inner(self, path.try_into().map_err(|_| Ext4Error::MalformedPath)?)
+        inner(self, path.try_into().map_err(|_| ResolveError::PathError(PathError::MalformedPath))?)
             .await
     }
 
@@ -1131,24 +1135,24 @@ impl Ext4 {
     ///
     /// This is not an exhaustive list of errors, see the
     /// [crate documentation](crate#errors).
-    pub async fn read_dir<'p, P>(&self, path: P) -> Result<ReadDir, Ext4Error>
+    pub async fn read_dir<'p, P>(&self, path: P) -> Result<ReadDir, DirOpenError>
     where
         P: TryInto<Path<'p>>,
     {
         async fn inner(
             fs: &Ext4,
             path: Path<'_>,
-        ) -> Result<ReadDir, Ext4Error> {
+        ) -> Result<ReadDir, DirOpenError> {
             let inode = fs.path_to_inode(path, FollowSymlinks::All).await?;
 
             if !inode.file_type().is_dir() {
-                return Err(Ext4Error::NotADirectory);
+                return Err(ResolveError::NotADirectory)?;
             }
 
-            ReadDir::new(fs.clone(), &inode, path.into())
+            Ok(ReadDir::new(fs.clone(), &inode, path.into())?)
         }
 
-        inner(self, path.try_into().map_err(|_| Ext4Error::MalformedPath)?)
+        inner(self, path.try_into().map_err(|_| ResolveError::PathError(PathError::MalformedPath))?)
             .await
     }
 
@@ -1164,19 +1168,19 @@ impl Ext4 {
     ///
     /// This is not an exhaustive list of errors, see the
     /// [crate documentation](crate#errors).
-    pub async fn exists<'p, P>(&self, path: P) -> Result<bool, Ext4Error>
+    pub async fn exists<'p, P>(&self, path: P) -> Result<bool, ResolveError>
     where
         P: TryInto<Path<'p>>,
     {
-        async fn inner(fs: &Ext4, path: Path<'_>) -> Result<bool, Ext4Error> {
+        async fn inner(fs: &Ext4, path: Path<'_>) -> Result<bool, ResolveError> {
             match fs.path_to_inode(path, FollowSymlinks::All).await {
                 Ok(_) => Ok(true),
-                Err(Ext4Error::NotFound) => Ok(false),
+                Err(ResolveError::NotFound) => Ok(false),
                 Err(err) => Err(err),
             }
         }
 
-        inner(self, path.try_into().map_err(|_| Ext4Error::MalformedPath)?)
+        inner(self, path.try_into().map_err(|_| ResolveError::PathError(PathError::MalformedPath))?)
             .await
     }
 
@@ -1190,19 +1194,19 @@ impl Ext4 {
     ///
     /// This is not an exhaustive list of errors, see the
     /// [crate documentation](crate#errors).
-    pub async fn metadata<'p, P>(&self, path: P) -> Result<Metadata, Ext4Error>
+    pub async fn metadata<'p, P>(&self, path: P) -> Result<Metadata, FileOpenError>
     where
         P: TryInto<Path<'p>>,
     {
         async fn inner(
             fs: &Ext4,
             path: Path<'_>,
-        ) -> Result<Metadata, Ext4Error> {
+        ) -> Result<Metadata, FileOpenError> {
             let inode = fs.path_to_inode(path, FollowSymlinks::All).await?;
             Ok(inode.metadata())
         }
 
-        inner(self, path.try_into().map_err(|_| Ext4Error::MalformedPath)?)
+        inner(self, path.try_into().map_err(|_| ResolveError::PathError(PathError::MalformedPath))?)
             .await
     }
 
@@ -1224,21 +1228,21 @@ impl Ext4 {
     pub async fn symlink_metadata<'p, P>(
         &self,
         path: P,
-    ) -> Result<Metadata, Ext4Error>
+    ) -> Result<Metadata, FileOpenError>
     where
         P: TryInto<Path<'p>>,
     {
         async fn inner(
             fs: &Ext4,
             path: Path<'_>,
-        ) -> Result<Metadata, Ext4Error> {
+        ) -> Result<Metadata, FileOpenError> {
             let inode = fs
                 .path_to_inode(path, FollowSymlinks::ExcludeFinalComponent)
                 .await?;
             Ok(inode.metadata())
         }
 
-        inner(self, path.try_into().map_err(|_| Ext4Error::MalformedPath)?)
+        inner(self, path.try_into().map_err(|_| ResolveError::PathError(PathError::MalformedPath))?)
             .await
     }
 }

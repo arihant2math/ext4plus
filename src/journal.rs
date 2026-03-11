@@ -15,7 +15,7 @@ mod superblock;
 
 use crate::Ext4;
 use crate::block_index::FsBlockIndex;
-use crate::error::Ext4Error;
+use crate::error::JournalLoadError;
 use crate::inode::Inode;
 use block_map::{BlockMap, load_block_map};
 use superblock::JournalSuperblock;
@@ -39,7 +39,7 @@ impl Journal {
     ///
     /// Note: ext4 is all little-endian, except for the journal, which
     /// is all big-endian.
-    pub(crate) async fn load(fs: &Ext4) -> Result<Self, Ext4Error> {
+    pub(crate) async fn load(fs: &Ext4) -> Result<Self, JournalLoadError> {
         let Some(journal_inode) = fs.0.superblock.journal_inode() else {
             // Return an empty journal if this filesystem does not have
             // a journal.

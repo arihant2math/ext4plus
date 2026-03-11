@@ -8,8 +8,9 @@
 
 use crate::dir::get_dir_entry_inode_by_name;
 use crate::inode::Inode;
-use crate::{DirEntryName, Ext4, Ext4Error, Path, PathBuf};
+use crate::{DirEntryName, Ext4, Path, PathBuf};
 use alloc::vec::Vec;
+use crate::error::{ResolveError, PathError, IterDirError};
 
 /// How symlinks are treated when looking up an inode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -62,7 +63,7 @@ pub(crate) async fn resolve_path(
     fs: &Ext4,
     path: Path<'_>,
     follow: FollowSymlinks,
-) -> Result<(Inode, PathBuf), Ext4Error> {
+) -> Result<(Inode, PathBuf), ResolveError> {
     // Maximum number of symlinks to resolve (for the whole path, not
     // individual components).
     const MAX_SYMLINKS: usize = 40;
@@ -76,14 +77,14 @@ pub(crate) async fn resolve_path(
     const MAX_ITERATIONS: usize = 1000;
 
     if !path.is_absolute() {
-        return Err(Ext4Error::NotAbsolute);
+        return Err(ResolveError::NotAbsolute);
     }
 
     // Check the initial path length. The length will also be checked
     // any time a symlink is spliced into the path, since it might get
     // longer then.
     if path.as_ref().len() > MAX_PATH_LEN {
-        return Err(Ext4Error::PathTooLong);
+        return Err(ResolveError::PathError(PathError::PathTooLong));
     }
 
     let mut path = path.as_ref().to_vec();
@@ -137,7 +138,7 @@ pub(crate) async fn resolve_path(
             // path is invalid. This handles a case like
             // "/a/b", where "a" is a regular file instead
             // of a directory.
-            return Err(Ext4Error::NotADirectory);
+            return Err(ResolveError::NotADirectory);
         }
 
         // Lookup the component's entry in the directory.
@@ -146,7 +147,10 @@ pub(crate) async fn resolve_path(
             &inode,
             DirEntryName::try_from(comp).unwrap(),
         )
-        .await?;
+        .await.map_err(|err| match err {
+            IterDirError::NotFound => ResolveError::NotFound,
+            other => ResolveError::IterDir(other),
+        })?;
 
         if comp == b"." {
             // Remove this component and continue on from the same index.
@@ -168,7 +172,7 @@ pub(crate) async fn resolve_path(
             // less than `usize::MAX`.
             num_symlinks = num_symlinks.checked_add(1).unwrap();
             if num_symlinks > MAX_SYMLINKS {
-                return Err(Ext4Error::TooManySymlinks);
+                return Err(ResolveError::TooManySymlinks);
             }
 
             let target = child_inode.symlink_target(fs).await?;
@@ -198,7 +202,7 @@ pub(crate) async fn resolve_path(
                 target.as_ref().iter().cloned(),
             );
             if path.len() > MAX_PATH_LEN {
-                return Err(Ext4Error::PathTooLong);
+                return Err(ResolveError::PathError(PathError::PathTooLong));
             }
             path_dedup_sep(&mut path);
         } else {
@@ -222,7 +226,7 @@ pub(crate) async fn resolve_path(
         if inode.file_type().is_dir() {
             path.pop();
         } else {
-            return Err(Ext4Error::NotADirectory);
+            return Err(ResolveError::NotADirectory);
         }
     }
 
@@ -463,14 +467,14 @@ mod tests {
         // Error: not absolute.
         assert!(matches!(
             resolve_path(fs, mkp("a"), follow).await,
-            Err(Ext4Error::NotAbsolute)
+            Err(ResolveError::NotAbsolute)
         ));
 
         // Error: initial path is too long.
         let long_path = "/a".repeat(2049);
         assert!(matches!(
             resolve_path(fs, mkp(&long_path), follow).await,
-            Err(Ext4Error::PathTooLong)
+            Err(ResolveError::PathError(PathError::PathTooLong))
         ));
 
         // Error: intermediate path is too long. (Same error as above,
@@ -483,25 +487,25 @@ mod tests {
                 follow
             )
             .await,
-            Err(Ext4Error::PathTooLong)
+            Err(ResolveError::PathError(PathError::PathTooLong))
         ));
 
         // Error: symlink loop.
         assert!(matches!(
             resolve_path(fs, mkp("/sym_loop_a"), follow).await,
-            Err(Ext4Error::TooManySymlinks)
+            Err(ResolveError::TooManySymlinks)
         ));
 
         // Error: tried to lookup a child of a regular file.
         assert!(matches!(
             resolve_path(fs, mkp("/empty_file/path"), follow).await,
-            Err(Ext4Error::NotADirectory)
+            Err(ResolveError::NotADirectory)
         ));
 
         // Error: separator after a regular file.
         assert!(matches!(
             resolve_path(fs, mkp("/empty_file/"), follow).await,
-            Err(Ext4Error::NotADirectory)
+            Err(ResolveError::NotADirectory)
         ));
 
         // Error: separator after a trailing component with a symlink in
@@ -513,13 +517,13 @@ mod tests {
                 FollowSymlinks::ExcludeFinalComponent
             )
             .await,
-            Err(Ext4Error::NotADirectory)
+            Err(ResolveError::NotADirectory)
         ));
 
         // Error: path does not exist.
         assert!(matches!(
             resolve_path(fs, mkp("/empty_dir/does_not_exist"), follow).await,
-            Err(Ext4Error::NotFound)
+            Err(ResolveError::NotFound)
         ));
     }
 }

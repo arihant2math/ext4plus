@@ -10,7 +10,7 @@
 use crate::block_group::BlockGroupIndex;
 use crate::block_index::FsBlockIndex;
 use crate::checksum::Checksum;
-use crate::error::{CorruptKind, Ext4Error};
+use crate::error::{CorruptKind, Ext4Error, InodeParseError, InodeReadError, SymlinkReadError};
 use crate::file_blocks::FileBlocks;
 use crate::file_type::FileType;
 use crate::metadata::Metadata;
@@ -194,14 +194,12 @@ impl Inode {
         ext4: &Ext4,
         index: InodeIndex,
         data: &[u8],
-    ) -> Result<(Self, u32), Ext4Error> {
+    ) -> Result<(Self, u32), InodeReadError> {
         // Inodes must be at least 128 bytes.
         if data.len() < 128 {
-            return Err(CorruptKind::InodeTruncated {
-                inode: index,
+            return Err(InodeParseError::Truncated {
                 size: data.len(),
-            }
-            .into());
+            })?;
         }
 
         // If metadata checksums are enabled, the inode must be big
@@ -209,11 +207,9 @@ impl Inode {
         if ext4.has_metadata_checksums()
             && data.len() < (Self::I_CHECKSUM_HI_OFFSET + 2)
         {
-            return Err(CorruptKind::InodeTruncated {
-                inode: index,
+            return Err(InodeParseError::Truncated {
                 size: data.len(),
-            }
-            .into());
+            })?;
         }
 
         let i_mode = read_u16le(data, 0x0);
@@ -242,7 +238,7 @@ impl Inode {
             Self {
                 index,
                 file_type: FileType::try_from(mode).map_err(|_| {
-                    CorruptKind::InodeFileType { inode: index, mode }
+                    InodeParseError::InvalidFileType { mode }
                 })?,
                 inode_data: data.to_vec(),
                 checksum_base,
@@ -305,7 +301,7 @@ impl Inode {
     pub async fn read(
         ext4: &Ext4,
         inode: InodeIndex,
-    ) -> Result<Self, Ext4Error> {
+    ) -> Result<Self, InodeReadError> {
         let (block_index, offset_within_block) =
             get_inode_location(ext4, inode)?;
 
@@ -342,7 +338,7 @@ impl Inode {
 
             let actual_checksum = checksum.finalize();
             if actual_checksum != expected_checksum {
-                return Err(CorruptKind::InodeChecksum(inode.index).into());
+                return Err(InodeParseError::Checksum)?;
             }
         }
 
@@ -400,14 +396,14 @@ impl Inode {
     pub async fn symlink_target(
         &self,
         ext4: &Ext4,
-    ) -> Result<PathBuf, Ext4Error> {
+    ) -> Result<PathBuf, SymlinkReadError> {
         if !self.file_type.is_symlink() {
-            return Err(Ext4Error::NotASymlink);
+            return Err(SymlinkReadError::NotASymlink)?;
         }
 
         // An empty symlink target is not allowed.
         if self.size_in_bytes() == 0 {
-            return Err(CorruptKind::SymlinkTarget(self.index).into());
+            return Err(SymlinkReadError::InvalidSymlinkTarget)?;
         }
 
         // Symlink targets of up to 59 bytes are stored inline. Longer
@@ -419,12 +415,12 @@ impl Inode {
             let len = usize::try_from(self.size_in_bytes()).unwrap();
             let target = &self.inline_data()[..len];
 
-            PathBuf::try_from(target)
-                .map_err(|_| CorruptKind::SymlinkTarget(self.index).into())
+            Ok(PathBuf::try_from(target)
+                .map_err(|_| SymlinkReadError::InvalidSymlinkTarget)?)
         } else {
             let data = ext4.read_inode_file(self).await?;
-            PathBuf::try_from(data)
-                .map_err(|_| CorruptKind::SymlinkTarget(self.index).into())
+            Ok(PathBuf::try_from(data)
+                .map_err(|_| SymlinkReadError::InvalidSymlinkTarget)?)
         }
     }
 

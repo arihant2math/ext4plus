@@ -6,6 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use ext4plus::error::{PathError, ResolveError, SymlinkReadError};
 use crate::expected_holes_data;
 use crate::test_util::load_test_disk1;
 use ext4plus::prelude::{AsyncIterator, Ext4Error, Path, PathBuf};
@@ -159,25 +160,25 @@ async fn test_read_link() {
     // Error: path is not absolute.
     assert!(matches!(
         fs.read_link("not_absolute").await.unwrap_err(),
-        Ext4Error::NotAbsolute
+        ResolveError::NotAbsolute
     ));
 
     // Error: malformed path.
     assert!(matches!(
         fs.read_link("\0").await.unwrap_err(),
-        Ext4Error::MalformedPath
+        ResolveError::PathError(PathError::MalformedPath)
     ));
 
     // Error: does not exist.
     assert!(matches!(
         fs.read_link("/does_not_exist").await.unwrap_err(),
-        Ext4Error::NotFound
+        ResolveError::NotFound
     ));
 
     // Error: not a symlink.
     assert!(matches!(
         fs.read_link("/small_file").await.unwrap_err(),
-        Ext4Error::NotASymlink
+        ResolveError::SymlinkReadError(SymlinkReadError::NotASymlink)
     ));
 }
 

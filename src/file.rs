@@ -13,7 +13,7 @@
 //! by the methods of [`File`] but can also be used directly if needed.
 
 use crate::block_index::FileBlockIndex;
-use crate::error::Ext4Error;
+use crate::error::{Ext4Error, FileOpenError, FileReadError, FileTruncateError};
 use crate::extent::Extent;
 use crate::file_blocks::FileBlocks;
 use crate::inode::Inode;
@@ -40,13 +40,13 @@ impl File {
     pub(crate) async fn open(
         fs: &Ext4,
         path: Path<'_>,
-    ) -> Result<Self, Ext4Error> {
+    ) -> Result<Self, FileOpenError> {
         let inode = fs.path_to_inode(path, FollowSymlinks::All).await?;
         if !inode.file_type().is_regular_file() {
-            return Err(Ext4Error::IsASpecialFile);
+            return Err(Ext4Error::IsASpecialFile)?;
         }
 
-        Self::open_inode(fs, inode)
+        Ok(Self::open_inode(fs, inode)?)
     }
 
     /// Open `inode`. Note that unlike `File::open`, this allows any
@@ -85,7 +85,7 @@ impl File {
     pub async fn read_bytes(
         &mut self,
         buf: &mut [u8],
-    ) -> Result<usize, Ext4Error> {
+    ) -> Result<usize, FileReadError> {
         let bytes_read = read_at_inner(
             &self.fs,
             &self.inode,
@@ -110,7 +110,7 @@ impl File {
         &mut self,
         buf: &mut [u8],
         pos: u64,
-    ) -> Result<usize, Ext4Error> {
+    ) -> Result<usize, FileReadError> {
         read_at_inner(&self.fs, &self.inode, &self.file_blocks, buf, pos).await
     }
 
@@ -144,7 +144,10 @@ impl File {
     }
 
     /// Truncate the file to `new_size` bytes.
-    pub async fn truncate(&mut self, new_size: u64) -> Result<(), Ext4Error> {
+    pub async fn truncate(
+        &mut self,
+        new_size: u64,
+    ) -> Result<(), FileTruncateError> {
         truncate(&self.fs, &mut self.inode, new_size).await?;
         Ok(())
     }
@@ -192,7 +195,7 @@ pub(crate) async fn read_at_inner(
     file_blocks: &FileBlocks,
     mut buf: &mut [u8],
     offset: u64,
-) -> Result<usize, Ext4Error> {
+) -> Result<usize, FileReadError> {
     // Nothing to do if output buffer is empty.
     if buf.is_empty() {
         return Ok(0);
@@ -273,7 +276,7 @@ pub async fn read_at(
     inode: &Inode,
     buf: &mut [u8],
     offset: u64,
-) -> Result<usize, Ext4Error> {
+) -> Result<usize, FileReadError> {
     let file_blocks = FileBlocks::from_inode(inode, ext4.clone())?;
     read_at_inner(ext4, inode, &file_blocks, buf, offset).await
 }
@@ -852,7 +855,7 @@ pub async fn truncate(
     ext4: &Ext4,
     inode: &mut Inode,
     new_size: u64,
-) -> Result<(), Ext4Error> {
+) -> Result<(), FileTruncateError> {
     let old_size = inode.size_in_bytes();
     if new_size == old_size {
         return Ok(());

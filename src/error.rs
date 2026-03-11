@@ -6,6 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 //! Error types used by various parts of the codebase.
+#![allow(missing_docs)]
 
 use crate::block_index::FsBlockIndex;
 use crate::block_size::BlockSize;
@@ -288,12 +289,6 @@ pub(crate) enum CorruptKind {
     /// tag.
     JournalDescriptorBlockTruncated,
 
-    /// An inode's checksum is invalid.
-    InodeChecksum(InodeIndex),
-
-    /// An inode is too small.
-    InodeTruncated { inode: InodeIndex, size: usize },
-
     /// Failed to calculate an inode's location.
     ///
     /// This error can be returned by various calculations in
@@ -310,9 +305,6 @@ pub(crate) enum CorruptKind {
 
     /// An inode's file type is invalid.
     InodeFileType { inode: InodeIndex, mode: InodeMode },
-
-    /// The target of a symlink is not a valid path.
-    SymlinkTarget(InodeIndex),
 
     /// The number of blocks in a file exceeds 2^32.
     TooManyBlocksInFile,
@@ -474,12 +466,6 @@ impl Display for CorruptKind {
             Self::JournalDescriptorBlockTruncated => {
                 write!(f, "journal descriptor block is truncated")
             }
-            Self::InodeChecksum(inode) => {
-                write!(f, "invalid checksum for inode {inode}")
-            }
-            Self::InodeTruncated { inode, size } => {
-                write!(f, "inode {inode} is truncated: size={size}")
-            }
             Self::InodeLocation {
                 inode,
                 block_group,
@@ -499,9 +485,6 @@ impl Display for CorruptKind {
                     "inode {inode} has invalid file type: mode=0x{mode:04x}",
                     mode = mode.bits()
                 )
-            }
-            Self::SymlinkTarget(inode) => {
-                write!(f, "inode {inode} has an invalid symlink path")
             }
             Self::TooManyBlocksInFile => write!(f, "too many blocks in file"),
             Self::ExtentMagic(inode) => {
@@ -745,6 +728,24 @@ impl From<IncompatibleKind> for Ext4Error {
     fn from(k: IncompatibleKind) -> Self {
         Self::Incompatible(Incompatible(k))
     }
+}
+
+error_set::error_set! {
+    PathError := { MalformedPath, PathTooLong }
+    InodeParseError := { Truncated { size: usize }, InvalidFileType { mode: InodeMode }, Checksum }
+    InodeReadError := { Ext4(Ext4Error), InodeParse(InodeParseError) }
+    FileReadError := { Ext4(Ext4Error), Other }
+    FileWriteError := { Ext4(Ext4Error) }
+    SymlinkReadError := { NotASymlink, InvalidSymlinkTarget, FileRead(FileReadError), PathError(PathError) }
+    FileTruncateError := { Ext4(Ext4Error) }
+    ResolveError := { Ext4(Ext4Error), SymlinkReadError(SymlinkReadError), PathError(PathError), IterDir(IterDirError), NotADirectory, TooManySymlinks, NotAbsolute, NotFound } || InodeReadError
+    FileOpenError := { Ext4(Ext4Error), Resolve(ResolveError) }
+    FileOpenReadError := FileOpenError || FileReadError
+    RegularFileOpenError := { IsASpecialFile } || FileOpenError
+    DirOpenError := FileOpenError
+    IterDirError := { Encrypted, NotFound } || InodeReadError
+    JournalLoadError := { Ext4(Ext4Error) } || InodeReadError
+    LoadError := { Ext4(Ext4Error) } || JournalLoadError
 }
 
 #[cfg(test)]

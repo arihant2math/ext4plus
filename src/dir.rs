@@ -11,7 +11,7 @@ use crate::Ext4;
 use crate::dir_block::DirBlock;
 use crate::dir_entry::DirEntryName;
 use crate::dir_htree::get_dir_entry_via_htree;
-use crate::error::{CorruptKind, Ext4Error};
+use crate::error::{CorruptKind, Ext4Error, IterDirError};
 use crate::file::write_at;
 use crate::file_type::FileType;
 use crate::inode::{Inode, InodeFlags, InodeIndex};
@@ -30,16 +30,16 @@ pub(crate) async fn get_dir_entry_inode_by_name(
     fs: &Ext4,
     dir_inode: &Inode,
     name: DirEntryName<'_>,
-) -> Result<Inode, Ext4Error> {
+) -> Result<Inode, IterDirError> {
     assert!(dir_inode.file_type().is_dir());
 
     if dir_inode.flags().contains(InodeFlags::DIRECTORY_ENCRYPTED) {
-        return Err(Ext4Error::Encrypted);
+        return Err(IterDirError::Encrypted);
     }
 
     if dir_inode.flags().contains(InodeFlags::DIRECTORY_HTREE) {
         let entry = get_dir_entry_via_htree(fs, dir_inode, name).await?;
-        return Inode::read(fs, entry.inode).await;
+        return Ok(Inode::read(fs, entry.inode).await?);
     }
 
     // The entry's `path()` method is not called, so the value of the
@@ -50,11 +50,11 @@ pub(crate) async fn get_dir_entry_inode_by_name(
     while let Some(entry) = iter.next().await {
         let entry = entry?;
         if entry.file_name() == name {
-            return Inode::read(fs, entry.inode).await;
+            return Ok(Inode::read(fs, entry.inode).await?);
         }
     }
 
-    Err(Ext4Error::NotFound)
+    Err(IterDirError::NotFound)
 }
 
 /// Add an item to a directory without an htree.
@@ -511,7 +511,7 @@ impl Dir {
     pub async fn get_entry(
         &self,
         name: DirEntryName<'_>,
-    ) -> Result<Inode, Ext4Error> {
+    ) -> Result<Inode, IterDirError> {
         get_dir_entry_inode_by_name(&self.fs, &self.inode, name).await
     }
 

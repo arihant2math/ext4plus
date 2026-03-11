@@ -7,7 +7,7 @@
 // except according to those terms.
 
 use crate::Ext4;
-use crate::error::{CorruptKind, Ext4Error};
+use crate::error::{CorruptKind, Ext4Error, InodeReadError};
 use crate::file_type::FileType;
 use crate::format::{BytesDisplay, format_bytes_debug};
 use crate::inode::{Inode, InodeIndex};
@@ -345,7 +345,7 @@ impl DirEntry {
     ///
     /// If the entry is a symlink, metadata for the symlink itself will
     /// be returned, not the symlink target.
-    pub async fn metadata(&self) -> Result<Metadata, Ext4Error> {
+    pub async fn metadata(&self) -> Result<Metadata, InodeReadError> {
         let inode = Inode::read(&self.fs, self.inode).await?;
         Ok(inode.metadata())
     }
