@@ -1291,6 +1291,7 @@ mod tests {
     use crate::block_index::FileBlockIndex;
     use crate::file_blocks::extent_tree::ExtentTree;
     use crate::test_util::load_test_disk1_rw;
+    use std::num::NonZeroU32;
 
     #[tokio::test]
     async fn test_extent_tree() {
@@ -1300,5 +1301,23 @@ mod tests {
             ExtentTree::from_inode(&root_inode, fs.0.clone()).unwrap();
         let extent = tree.find_extent(0).await.unwrap().unwrap();
         assert_eq!(extent.block_within_file, 0);
+    }
+
+    #[tokio::test]
+    async fn test_extent_tree_insert() {
+        let fs = load_test_disk1_rw().await;
+        let root_inode = fs.read_root_inode().await.unwrap();
+        let mut tree =
+            ExtentTree::from_inode(&root_inode, fs.0.clone()).unwrap();
+        // Allocate some extents
+        let (_, last_allocated) =
+            tree.last_allocated_extent().await.unwrap().unwrap();
+        tree.allocate(
+            last_allocated.block_within_file
+                + last_allocated.num_blocks as u32
+                + 1,
+            NonZeroU32::new(5).unwrap(),
+            true,
+        );
     }
 }
