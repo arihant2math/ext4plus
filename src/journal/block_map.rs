@@ -51,10 +51,8 @@ pub(super) async fn load_block_map(
                 // If a corruption error occurred, stop reading the
                 // journal. Any uncommitted changes are discarded.
                 break;
-            } else {
-                // Propagate any other type of error.
-                return Err(err);
             }
+            return Err(err);
         }
 
         // Stop reading if the end of the journal was reached.

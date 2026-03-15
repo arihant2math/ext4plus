@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - BREAKING: `AsyncIterator::collect` functions like `Iterator::collect` now and requires a generic type parameter.
+- BREAKING: Remove `Dir::open` and make `Dir::open_indoe` non-async.
 - Added a sync API which is gated behind the `sync` feature flag.
 - Error when writing to immutable files.
 

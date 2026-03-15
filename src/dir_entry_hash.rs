@@ -207,7 +207,7 @@ fn tea(state: &mut StateBlock, data: &HashBlock<4>) {
 }
 
 // Using `as` is currently the best way to get sign extension.
-#[allow(clippy::as_conversions)]
+#[allow(clippy::as_conversions, clippy::cast_possible_wrap)]
 fn sign_extend_byte_to_u32(byte: u8) -> u32 {
     let sbyte = byte as i8;
     sbyte as u32

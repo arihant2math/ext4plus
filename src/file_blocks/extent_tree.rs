@@ -956,7 +956,7 @@ impl ExtentTree {
     }
 
     /// Remove all extents that overlap file-block range [start, start+num_blocks)
-    /// and return any freed FsBlockIndex ranges (so caller can free blocks).
+    /// and return any freed [`FsBlockIndex`] ranges (so caller can free blocks).
     #[maybe_async::maybe_async]
     pub(crate) async fn remove_extent_range(
         &mut self,

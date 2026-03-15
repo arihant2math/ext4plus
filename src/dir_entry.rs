@@ -69,6 +69,9 @@ impl<'a> DirEntryName<'a> {
     pub const MAX_LEN: usize = 255;
 
     /// Convert to a `&str` if the name is valid UTF-8.
+    ///
+    /// # Errors
+    /// See [`core::str::from_utf8`] for details on when this can fail.
     #[inline]
     pub fn as_str(&self) -> Result<&'a str, Utf8Error> {
         core::str::from_utf8(self.0)
@@ -345,6 +348,10 @@ impl DirEntry {
     ///
     /// If the entry is a symlink, metadata for the symlink itself will
     /// be returned, not the symlink target.
+    ///
+    /// # Errors
+    /// Errors if the entry's inode cannot be read, which could indicate
+    /// filesystem corruption.
     #[maybe_async::maybe_async]
     pub async fn metadata(&self) -> Result<Metadata, Ext4Error> {
         let inode = Inode::read(&self.fs, self.inode).await?;

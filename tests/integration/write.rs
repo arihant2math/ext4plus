@@ -169,7 +169,7 @@ async fn test_inode_creation() {
         assert_eq!(new_inode.metadata().uid, 0);
         assert_eq!(new_inode.metadata().gid, 0);
         let root_inode = fs.read_root_inode().await.unwrap();
-        let root_dir = Dir::open_inode(&fs.0, root_inode).await.unwrap();
+        let root_dir = Dir::open_inode(&fs.0, root_inode).unwrap();
         // Link the new inode into the root directory.
         root_dir
             .link(DirEntryName::try_from(b"new_file").unwrap(), &mut new_inode)
@@ -196,7 +196,7 @@ async fn test_inode_deletion() {
         .path_to_inode(Path::try_from("/").unwrap(), FollowSymlinks::All)
         .await
         .unwrap();
-    let root_dir = Dir::open_inode(&fs.0, root_inode).await.unwrap();
+    let root_dir = Dir::open_inode(&fs.0, root_inode).unwrap();
     let empty_inode = fs
         .path_to_inode("/empty_file".try_into().unwrap(), FollowSymlinks::All)
         .await
@@ -432,7 +432,6 @@ async fn test_init_directory_creates_dot_and_dotdot() {
     for fs in fses {
         let root_dir =
             Dir::open_inode(&fs.0, fs.read_root_inode().await.unwrap())
-                .await
                 .unwrap();
 
         // Create a new directory inode and initialize it.
@@ -590,7 +589,7 @@ async fn test_create_symlink() {
     let fses = [load_test_disk1_rw().await, load_ext2_rw().await];
     for fs in fses {
         let root_inode = fs.read_root_inode().await.unwrap();
-        let root_dir = Dir::open_inode(&fs.0, root_inode).await.unwrap();
+        let root_dir = Dir::open_inode(&fs.0, root_inode).unwrap();
         fs.symlink(
             &root_dir,
             DirEntryName::try_from(b"link_to_small").unwrap(),

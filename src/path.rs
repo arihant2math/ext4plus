@@ -139,6 +139,9 @@ impl<'a> Path<'a> {
     }
 
     /// Convert to a `&str` if the path is valid UTF-8.
+    ///
+    /// # Errors
+    /// This returns an error if the path is not valid UTF-8, see [`str::from_utf8`] for details.
     pub fn to_str(self) -> Result<&'a str, Utf8Error> {
         str::from_utf8(self.0)
     }
@@ -350,7 +353,7 @@ impl PathBuf {
             this.0.extend(p.0);
         }
 
-        inner(self, path.as_ref())
+        inner(self, path.as_ref());
     }
 
     /// Create a new `PathBuf` joining `self` with `path`.
@@ -375,6 +378,9 @@ impl PathBuf {
     }
 
     /// Convert to a `&str` if the path is valid UTF-8.
+    ///
+    /// # Errors
+    /// See [`Path::to_str`] for details.
     pub fn to_str(&self) -> Result<&str, Utf8Error> {
         self.as_path().to_str()
     }

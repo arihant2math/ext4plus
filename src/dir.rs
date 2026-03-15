@@ -484,11 +484,7 @@ impl Dir {
     }
 
     /// Open a directory by inode.
-    #[maybe_async::maybe_async]
-    pub async fn open_inode(
-        fs: &Ext4,
-        inode: Inode,
-    ) -> Result<Self, Ext4Error> {
+    pub fn open_inode(fs: &Ext4, inode: Inode) -> Result<Self, Ext4Error> {
         if !inode.file_type().is_dir() {
             return Err(Ext4Error::NotADirectory);
         }
@@ -496,16 +492,6 @@ impl Dir {
             fs: fs.clone(),
             inode,
         })
-    }
-
-    /// Open a directory by inode.
-    #[deprecated(note = "use `Dir::open_inode` instead")]
-    #[maybe_async::maybe_async]
-    pub async fn open(fs: Ext4, inode: Inode) -> Result<Self, Ext4Error> {
-        if !inode.file_type().is_dir() {
-            return Err(Ext4Error::NotADirectory);
-        }
-        Ok(Self { fs, inode })
     }
 
     /// Return an iterator over the entries in this directory.
