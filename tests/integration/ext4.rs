@@ -10,7 +10,10 @@ use crate::expected_holes_data;
 use crate::test_util::load_test_disk1;
 use ext4plus::prelude::{AsyncIterator, Ext4Error, Path, PathBuf};
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_ext4_debug() {
     let fs = load_test_disk1().await;
     let s = format!("{fs:?}");
@@ -19,174 +22,169 @@ async fn test_ext4_debug() {
     assert!(s.ends_with(", .. }"));
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_canonicalize() {
     let fs = load_test_disk1().await;
 
-    assert_eq!(fs.canonicalize("/empty_file").await.unwrap(), "/empty_file");
+    let path = fs.canonicalize("/empty_file").await.unwrap();
+    assert_eq!(path, "/empty_file");
 
-    assert_eq!(fs.canonicalize("/").await.unwrap(), "/");
-    assert_eq!(fs.canonicalize("/..").await.unwrap(), "/");
-    assert_eq!(fs.canonicalize("/dir1").await.unwrap(), "/dir1");
-    assert_eq!(fs.canonicalize("/dir1/").await.unwrap(), "/dir1");
-    assert_eq!(fs.canonicalize("/dir1/.").await.unwrap(), "/dir1");
-    assert_eq!(fs.canonicalize("/dir1/./").await.unwrap(), "/dir1");
-    assert_eq!(fs.canonicalize("/dir1/../dir1").await.unwrap(), "/dir1");
-    assert_eq!(fs.canonicalize("/dir1/../dir1/").await.unwrap(), "/dir1");
-    assert_eq!(
-        fs.canonicalize("/dir1/dir2/sym_abs").await.unwrap(),
-        "/small_file"
-    );
-    assert_eq!(
-        fs.canonicalize("/dir1/dir2/sym_rel").await.unwrap(),
-        "/small_file"
-    );
-    assert_eq!(
-        fs.canonicalize("/dir1/dir2/sym_abs_dir").await.unwrap(),
-        "/dir1"
-    );
-    assert_eq!(
-        fs.canonicalize("/dir1/dir2/sym_abs_dir/").await.unwrap(),
-        "/dir1"
-    );
-    assert_eq!(
-        fs.canonicalize("/dir1/dir2/sym_rel_dir").await.unwrap(),
-        "/dir1"
-    );
-    assert_eq!(
-        fs.canonicalize("/dir1/dir2/sym_rel_dir/").await.unwrap(),
-        "/dir1"
-    );
+    let path = fs.canonicalize("/").await.unwrap();
+    assert_eq!(path, "/");
+    let path = fs.canonicalize("/..").await.unwrap();
+    assert_eq!(path, "/");
+    let path = fs.canonicalize("/dir1").await.unwrap();
+    assert_eq!(path, "/dir1");
+    let path = fs.canonicalize("/dir1/").await.unwrap();
+    assert_eq!(path, "/dir1");
+    let path = fs.canonicalize("/dir1/.").await.unwrap();
+    assert_eq!(path, "/dir1");
+    let path = fs.canonicalize("/dir1/./").await.unwrap();
+    assert_eq!(path, "/dir1");
+    let path = fs.canonicalize("/dir1/../dir1").await.unwrap();
+    assert_eq!(path, "/dir1");
+    let path = fs.canonicalize("/dir1/../dir1/").await.unwrap();
+    assert_eq!(path, "/dir1");
+    let path = fs.canonicalize("/dir1/dir2/sym_abs").await.unwrap();
+    assert_eq!(path, "/small_file");
+    let path = fs.canonicalize("/dir1/dir2/sym_rel").await.unwrap();
+    assert_eq!(path, "/small_file");
+    let path = fs.canonicalize("/dir1/dir2/sym_abs_dir").await.unwrap();
+    assert_eq!(path, "/dir1");
+    let path = fs.canonicalize("/dir1/dir2/sym_abs_dir/").await.unwrap();
+    assert_eq!(path, "/dir1");
+    let path = fs.canonicalize("/dir1/dir2/sym_rel_dir").await.unwrap();
+    assert_eq!(path, "/dir1");
+    let path = fs.canonicalize("/dir1/dir2/sym_rel_dir/").await.unwrap();
+    assert_eq!(path, "/dir1");
 
     // Error: does not exist.
-    assert!(matches!(
-        fs.canonicalize("/does_not_exist").await.unwrap_err(),
-        Ext4Error::NotFound
-    ));
+    let err = fs.canonicalize("/does_not_exist").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::NotFound));
 
     // Error: child of a non-directory.
-    assert!(matches!(
-        fs.canonicalize("/small_file/invalid").await.unwrap_err(),
-        Ext4Error::NotADirectory
-    ));
+    let err = fs.canonicalize("/small_file/invalid").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::NotADirectory));
 
     // Error: malformed path.
-    assert!(matches!(
-        fs.canonicalize("\0").await.unwrap_err(),
-        Ext4Error::MalformedPath
-    ));
+    let err = fs.canonicalize("\0").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::MalformedPath));
 
     // Error: path is not absolute.
-    assert!(matches!(
-        fs.canonicalize("not_absolute").await.unwrap_err(),
-        Ext4Error::NotAbsolute
-    ));
+    let err = fs.canonicalize("not_absolute").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::NotAbsolute));
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_read() {
     let fs = load_test_disk1().await;
 
     // Empty file.
-    assert_eq!(fs.read("/empty_file").await.unwrap(), []);
+    let content = fs.read("/empty_file").await.unwrap();
+    assert_eq!(content, []);
 
     // Small file.
-    assert_eq!(fs.read("/small_file").await.unwrap(), b"hello, world!");
+    let content = fs.read("/small_file").await.unwrap();
+    assert_eq!(content, b"hello, world!");
 
     // File with holes.
-    assert_eq!(fs.read("/holes").await.unwrap(), expected_holes_data());
+    let content = fs.read("/holes").await.unwrap();
+    assert_eq!(content, expected_holes_data());
 
     // Errors.
-    assert!(fs.read("not_absolute").await.is_err());
-    assert!(fs.read("/does_not_exist").await.is_err());
+    let err = fs.read("not_absolute").await;
+    assert!(err.is_err());
+    let err = fs.read("/does_not_exist").await;
+    assert!(err.is_err());
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_read_to_string() {
     let fs = load_test_disk1().await;
 
     // Empty file.
-    assert_eq!(fs.read_to_string("/empty_file").await.unwrap(), "");
+    let text = fs.read_to_string("/empty_file").await.unwrap();
+    assert_eq!(text, "");
 
     // Small file.
+    let text = fs.read_to_string("/small_file").await.unwrap();
     assert_eq!(
-        fs.read_to_string("/small_file").await.unwrap(),
+        text,
         "hello, world!"
     );
 
     // Errors:
-    assert!(matches!(
-        fs.read_to_string("/holes").await.unwrap_err(),
-        Ext4Error::NotUtf8
-    ));
-    assert!(matches!(
-        fs.read_to_string("/empty_dir").await.unwrap_err(),
-        Ext4Error::IsADirectory
-    ));
-    assert!(matches!(
-        fs.read_to_string("not_absolute").await.unwrap_err(),
-        Ext4Error::NotAbsolute
-    ));
-    assert!(matches!(
-        fs.read_to_string("/does_not_exist").await.unwrap_err(),
-        Ext4Error::NotFound
-    ));
-    assert!(matches!(
-        fs.read_to_string("\0").await.unwrap_err(),
-        Ext4Error::MalformedPath
-    ));
+    let err = fs.read_to_string("/holes").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::NotUtf8));
+    let err = fs.read_to_string("/empty_dir").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::IsADirectory));
+    let err = fs.read_to_string("not_absolute").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::NotAbsolute));
+    let err = fs.read_to_string("/does_not_exist").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::NotFound));
+    let err = fs.read_to_string("\0").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::MalformedPath));
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_read_link() {
     let fs = load_test_disk1().await;
 
     // Basic success test.
-    assert_eq!(fs.read_link("/sym_simple").await.unwrap(), "small_file");
+    let link = fs.read_link("/sym_simple").await.unwrap();
+    assert_eq!(link, "small_file");
 
     // Symlinks prior to the final component are expanded as normal.
-    assert_eq!(
-        fs.read_link("/dir1/dir2/sym_abs_dir/../sym_simple")
-            .await
-            .unwrap(),
-        "small_file"
-    );
+    let link = fs
+        .read_link("/dir1/dir2/sym_abs_dir/../sym_simple")
+        .await
+        .unwrap();
+    assert_eq!(link, "small_file");
 
     // Short symlink target is inline, longer symlink is stored in extents.
-    assert_eq!(fs.read_link("/sym_59").await.unwrap(), "a".repeat(59));
-    assert_eq!(fs.read_link("/sym_60").await.unwrap(), "a".repeat(60));
+    let link = fs.read_link("/sym_59").await.unwrap();
+    assert_eq!(link, "a".repeat(59));
+    let link = fs.read_link("/sym_60").await.unwrap();
+    assert_eq!(link, "a".repeat(60));
 
     // Error: path is not absolute.
-    assert!(matches!(
-        fs.read_link("not_absolute").await.unwrap_err(),
-        Ext4Error::NotAbsolute
-    ));
+    let err = fs.read_link("not_absolute").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::NotAbsolute));
 
     // Error: malformed path.
-    assert!(matches!(
-        fs.read_link("\0").await.unwrap_err(),
-        Ext4Error::MalformedPath
-    ));
+    let err = fs.read_link("\0").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::MalformedPath));
 
     // Error: does not exist.
-    assert!(matches!(
-        fs.read_link("/does_not_exist").await.unwrap_err(),
-        Ext4Error::NotFound
-    ));
+    let err = fs.read_link("/does_not_exist").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::NotFound));
 
     // Error: not a symlink.
-    assert!(matches!(
-        fs.read_link("/small_file").await.unwrap_err(),
-        Ext4Error::NotASymlink
-    ));
+    let err = fs.read_link("/small_file").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::NotASymlink));
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_read_dir() {
     let fs = load_test_disk1().await;
 
     // Get contents of directory `/big_dir`.
-    let dir = fs.read_dir("/big_dir").await.unwrap().collect().await;
+    let dir: Vec<_> = fs.read_dir("/big_dir").await.unwrap().collect().await;
     let dir = dir.into_iter().map(|s| s.unwrap()).collect::<Vec<_>>();
 
     // Get the sorted list of entry names.
@@ -226,44 +224,42 @@ async fn test_read_dir() {
     assert_eq!(entry_paths, expected_paths);
 
     // Errors:
-    assert!(matches!(
-        fs.read_dir("not_absolute").await.unwrap_err(),
-        Ext4Error::NotAbsolute
-    ));
-    assert!(matches!(
-        fs.read_dir("/empty_file").await.unwrap_err(),
-        Ext4Error::NotADirectory
-    ));
-    assert!(matches!(
-        fs.read_dir("\0").await.unwrap_err(),
-        Ext4Error::MalformedPath
-    ));
+    let err = fs.read_dir("not_absolute").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::NotAbsolute));
+    let err = fs.read_dir("/empty_file").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::NotADirectory));
+    let err = fs.read_dir("\0").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::MalformedPath));
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_exists() {
     let fs = load_test_disk1().await;
 
     // Success: exists.
-    assert!(fs.exists("/empty_file").await.unwrap());
+    let exists = fs.exists("/empty_file").await.unwrap();
+    assert!(exists);
 
     // Success: does not exist.
-    assert!(!fs.exists("/does_not_exist").await.unwrap());
+    let exists = fs.exists("/does_not_exist").await.unwrap();
+    assert!(!exists);
 
     // Error: malformed path.
-    assert!(matches!(
-        fs.exists("\0").await.unwrap_err(),
-        Ext4Error::MalformedPath
-    ));
+    let err = fs.exists("\0").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::MalformedPath));
 
     // Error: path is not absolute.
-    assert!(matches!(
-        fs.exists("not_absolute").await.unwrap_err(),
-        Ext4Error::NotAbsolute
-    ));
+    let err = fs.exists("not_absolute").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::NotAbsolute));
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_metadata() {
     let fs = load_test_disk1().await;
 
@@ -278,19 +274,18 @@ async fn test_metadata() {
     );
 
     // Error: malformed path.
-    assert!(matches!(
-        fs.metadata("\0").await.unwrap_err(),
-        Ext4Error::MalformedPath
-    ));
+    let err = fs.metadata("\0").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::MalformedPath));
 
     // Error: path is not absolute.
-    assert!(matches!(
-        fs.metadata("not_absolute").await.unwrap_err(),
-        Ext4Error::NotAbsolute
-    ));
+    let err = fs.metadata("not_absolute").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::NotAbsolute));
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_metadata_uid_gid() {
     let fs = load_test_disk1().await;
 
@@ -299,7 +294,10 @@ async fn test_metadata_uid_gid() {
     assert_eq!(metadata.gid(), 456);
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_direntry_debug() {
     let fs = load_test_disk1().await;
     let entry = fs
@@ -315,7 +313,10 @@ async fn test_direntry_debug() {
     assert_eq!(format!("{entry:?}"), r#"DirEntry("/small_file")"#);
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_direntry_metadata() {
     let fs = load_test_disk1().await;
 
@@ -340,7 +341,10 @@ async fn test_direntry_metadata() {
     );
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_symlink_metadata() {
     let fs = load_test_disk1().await;
 
@@ -350,33 +354,30 @@ async fn test_symlink_metadata() {
     assert_eq!(metadata.mode(), 0o777);
 
     // Symlinks prior to the final component are followed as normal.
-    assert_eq!(
-        fs.symlink_metadata("/dir1/dir2/sym_abs_dir/../sym_simple")
-            .await
-            .unwrap(),
-        metadata
-    );
+    let symlink_metadata = fs
+        .symlink_metadata("/dir1/dir2/sym_abs_dir/../sym_simple")
+        .await
+        .unwrap();
+    assert_eq!(symlink_metadata, metadata);
 
     // Final component not a symlink behaves same as `metadata`.
-    assert_eq!(
-        fs.symlink_metadata("/small_file").await.unwrap(),
-        fs.metadata("/small_file").await.unwrap()
-    );
+    let symlink_metadata = fs.symlink_metadata("/small_file").await.unwrap();
+    let metadata = fs.metadata("/small_file").await.unwrap();
+    assert_eq!(symlink_metadata, metadata);
 
     // Error: malformed path.
-    assert!(matches!(
-        fs.symlink_metadata("\0").await.unwrap_err(),
-        Ext4Error::MalformedPath
-    ));
+    let err = fs.symlink_metadata("\0").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::MalformedPath));
 
     // Error: path is not absolute.
-    assert!(matches!(
-        fs.symlink_metadata("not_absolute").await.unwrap_err(),
-        Ext4Error::NotAbsolute
-    ));
+    let err = fs.symlink_metadata("not_absolute").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::NotAbsolute));
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_htree() {
     let fs = load_test_disk1().await;
 
@@ -388,29 +389,30 @@ async fn test_htree() {
     let medium_dir = Path::new("/medium_dir");
     for i in 0..1_000 {
         let i = i.to_string();
-        assert_eq!(fs.read_to_string(&medium_dir.join(&i)).await.unwrap(), i);
+        let content = fs.read_to_string(&medium_dir.join(&i)).await.unwrap();
+        assert_eq!(content, i);
     }
 
     let big_dir = Path::new("/big_dir");
     for i in 0..10_000 {
         let i = i.to_string();
-        assert_eq!(fs.read_to_string(&big_dir.join(&i)).await.unwrap(), i);
+        let content = fs.read_to_string(&big_dir.join(&i)).await.unwrap();
+        assert_eq!(content, i);
     }
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_encrypted_dir() {
     let fs = load_test_disk1().await;
 
     // This covers the check in `get_dir_entry_inode_by_name`.
-    assert!(matches!(
-        fs.read("/encrypted_dir/file").await.unwrap_err(),
-        Ext4Error::Encrypted
-    ));
+    let err = fs.read("/encrypted_dir/file").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::Encrypted));
 
     // This covers the check in `ReadDir::new`.
-    assert!(matches!(
-        fs.read_dir("/encrypted_dir").await.unwrap_err(),
-        Ext4Error::Encrypted
-    ));
+    let err = fs.read_dir("/encrypted_dir").await.unwrap_err();
+    assert!(matches!(err, Ext4Error::Encrypted));
 }

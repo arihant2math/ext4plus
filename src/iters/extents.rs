@@ -186,6 +186,7 @@ impl Extents {
     //   just means the iterator is not in a leaf node. The outer loop
     //   in `Iterator::next` will call `next_impl` again as long as
     //   there are nodes left to process.
+    #[maybe_async::maybe_async]
     async fn next_impl(&mut self) -> Result<Option<Extent>, Ext4Error> {
         let Some(item) = self.to_visit.last_mut() else {
             self.is_done = true;

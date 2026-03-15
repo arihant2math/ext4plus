@@ -58,6 +58,7 @@ pub enum FollowSymlinks {
 /// This function panics if path resolution takes over 1000
 /// iterations. This should never occur in practice due to other
 /// restrictions, this is just a hedge against unforeseen bugs.
+#[maybe_async::maybe_async]
 pub(crate) async fn resolve_path(
     fs: &Ext4,
     path: Path<'_>,
@@ -353,7 +354,10 @@ mod tests {
     }
 
     #[cfg(feature = "std")]
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_resolve() {
         let fs = &crate::test_util::load_test_disk1().await;
 
@@ -410,7 +414,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(path, small_file_path);
-        assert_eq!(fs.read_inode_file(&inode).await.unwrap(), b"hello, world!");
+        let text = fs.read_inode_file(&inode).await.unwrap();
+        assert_eq!(text, b"hello, world!");
         let small_file_inode = inode.index;
 
         // Check relative symlink.
@@ -461,65 +466,50 @@ mod tests {
         assert!(inode.metadata().is_symlink());
 
         // Error: not absolute.
-        assert!(matches!(
-            resolve_path(fs, mkp("a"), follow).await,
-            Err(Ext4Error::NotAbsolute)
-        ));
+        let err = resolve_path(fs, mkp("a"), follow).await;
+        assert!(matches!(err, Err(Ext4Error::NotAbsolute)));
 
         // Error: initial path is too long.
         let long_path = "/a".repeat(2049);
-        assert!(matches!(
-            resolve_path(fs, mkp(&long_path), follow).await,
-            Err(Ext4Error::PathTooLong)
-        ));
+        let err = resolve_path(fs, mkp(&long_path), follow).await;
+        assert!(matches!(err, Err(Ext4Error::PathTooLong)));
 
         // Error: intermediate path is too long. (Same error as above,
         // but difference is visible in code coverage.)
         let long_path = "a/".repeat(2030);
-        assert!(matches!(
-            resolve_path(
-                fs,
-                mkp("/sym_long").join(long_path).as_path(),
-                follow
-            )
-            .await,
-            Err(Ext4Error::PathTooLong)
-        ));
+        let err = resolve_path(
+            fs,
+            mkp("/sym_long").join(long_path).as_path(),
+            follow,
+        )
+        .await;
+        assert!(matches!(err, Err(Ext4Error::PathTooLong)));
 
         // Error: symlink loop.
-        assert!(matches!(
-            resolve_path(fs, mkp("/sym_loop_a"), follow).await,
-            Err(Ext4Error::TooManySymlinks)
-        ));
+        let err = resolve_path(fs, mkp("/sym_loop_a"), follow).await;
+        assert!(matches!(err, Err(Ext4Error::TooManySymlinks)));
 
         // Error: tried to lookup a child of a regular file.
-        assert!(matches!(
-            resolve_path(fs, mkp("/empty_file/path"), follow).await,
-            Err(Ext4Error::NotADirectory)
-        ));
+        let err = resolve_path(fs, mkp("/empty_file/path"), follow).await;
+        assert!(matches!(err, Err(Ext4Error::NotADirectory)));
 
         // Error: separator after a regular file.
-        assert!(matches!(
-            resolve_path(fs, mkp("/empty_file/"), follow).await,
-            Err(Ext4Error::NotADirectory)
-        ));
+        let err = resolve_path(fs, mkp("/empty_file/"), follow).await;
+        assert!(matches!(err, Err(Ext4Error::NotADirectory)));
 
         // Error: separator after a trailing component with a symlink in
         // `ExcludeFinalComponent` mode.
-        assert!(matches!(
-            resolve_path(
-                fs,
-                mkp("/dir1/dir2/sym_abs_dir/"),
-                FollowSymlinks::ExcludeFinalComponent
-            )
-            .await,
-            Err(Ext4Error::NotADirectory)
-        ));
+        let err = resolve_path(
+            fs,
+            mkp("/dir1/dir2/sym_abs_dir/"),
+            FollowSymlinks::ExcludeFinalComponent,
+        )
+        .await;
+        assert!(matches!(err, Err(Ext4Error::NotADirectory)));
 
         // Error: path does not exist.
-        assert!(matches!(
-            resolve_path(fs, mkp("/empty_dir/does_not_exist"), follow).await,
-            Err(Ext4Error::NotFound)
-        ));
+        let err =
+            resolve_path(fs, mkp("/empty_dir/does_not_exist"), follow).await;
+        assert!(matches!(err, Err(Ext4Error::NotFound)));
     }
 }

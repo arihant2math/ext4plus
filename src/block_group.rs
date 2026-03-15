@@ -398,6 +398,7 @@ impl BlockGroupDescriptor {
     }
 
     /// Read a block group descriptor.
+    #[maybe_async::maybe_async]
     async fn read(
         sb: &Superblock,
         reader: &mut dyn Ext4Read,
@@ -450,6 +451,7 @@ impl BlockGroupDescriptor {
         Ok(block_group_descriptor)
     }
 
+    #[maybe_async::maybe_async]
     pub(crate) async fn write(&self, ext4: &Ext4) -> Result<(), Ext4Error> {
         let start = Self::get_start_byte(&ext4.0.superblock, self.index)
             .ok_or(CorruptKind::BlockGroupDescriptor(self.index))?;
@@ -464,6 +466,7 @@ impl BlockGroupDescriptor {
     }
 
     /// Read all block group descriptors.
+    #[maybe_async::maybe_async]
     pub(crate) async fn read_all(
         sb: &Superblock,
         reader: &mut dyn Ext4Read,

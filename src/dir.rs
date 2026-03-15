@@ -15,6 +15,7 @@ use crate::error::{CorruptKind, Ext4Error};
 use crate::file::write_at;
 use crate::file_type::FileType;
 use crate::inode::{Inode, InodeFlags, InodeIndex};
+#[cfg(not(feature = "sync"))]
 use crate::iters::AsyncIterator;
 use crate::iters::file_blocks::FileBlocks;
 use crate::iters::read_dir::ReadDir;
@@ -26,6 +27,7 @@ use alloc::vec;
 /// Search a directory inode for an entry with the given `name`. If
 /// found, return the entry's inode, otherwise return a `NotFound`
 /// error.
+#[maybe_async::maybe_async]
 pub(crate) async fn get_dir_entry_inode_by_name(
     fs: &Ext4,
     dir_inode: &Inode,
@@ -61,6 +63,7 @@ pub(crate) async fn get_dir_entry_inode_by_name(
 ///
 /// This edits directory entry bytes in-place and will error with
 /// [`Ext4Error::Readonly`] if it would require allocating a new block.
+#[maybe_async::maybe_async]
 pub(crate) async fn add_dir_entry_non_htree(
     fs: &Ext4,
     dir_inode: &Inode,
@@ -198,6 +201,7 @@ pub(crate) async fn add_dir_entry_non_htree(
 /// This edits directory entry bytes in-place. It will error with
 /// [`Ext4Error::Readonly`] if the removal would require freeing a block
 /// (which this crate does not implement).
+#[maybe_async::maybe_async]
 pub(crate) async fn remove_dir_entry_non_htree(
     fs: &Ext4,
     dir_inode: &Inode,
@@ -312,6 +316,7 @@ pub(crate) async fn remove_dir_entry_non_htree(
 ///   will be updated and persisted.
 /// - This does not modify the parent directory; callers typically still need to
 ///   link the new directory into the parent.
+#[maybe_async::maybe_async]
 pub(crate) async fn init_directory(
     fs: &Ext4,
     dir_inode: &mut Inode,
@@ -467,6 +472,7 @@ pub struct Dir {
 
 impl Dir {
     /// Create and initialize a new directory.
+    #[maybe_async::maybe_async]
     pub async fn init(
         fs: Ext4,
         mut dir_inode: Inode,
@@ -480,6 +486,7 @@ impl Dir {
     }
 
     /// Open a directory by inode.
+    #[maybe_async::maybe_async]
     pub async fn open_inode(
         fs: &Ext4,
         inode: Inode,
@@ -495,6 +502,7 @@ impl Dir {
 
     /// Open a directory by inode.
     #[deprecated(note = "use `Dir::open_inode` instead")]
+    #[maybe_async::maybe_async]
     pub async fn open(fs: Ext4, inode: Inode) -> Result<Self, Ext4Error> {
         if !inode.file_type().is_dir() {
             return Err(Ext4Error::NotADirectory);
@@ -508,6 +516,7 @@ impl Dir {
     }
 
     /// Return the inode for the entry with the given name in this directory.
+    #[maybe_async::maybe_async]
     pub async fn get_entry(
         &self,
         name: DirEntryName<'_>,
@@ -524,6 +533,7 @@ impl Dir {
     ///
     /// An error will be returned if:
     /// * The current directory is a htree
+    #[maybe_async::maybe_async]
     pub async fn link(
         &self,
         name: DirEntryName<'_>,
@@ -555,6 +565,7 @@ impl Dir {
     /// * The current directory is a htree (`Readonly`)
     /// * The entry does not exist (`NotFound`)
     /// * The entry is "." or ".." (`DotEntry`)
+    #[maybe_async::maybe_async]
     pub async fn unlink(
         &self,
         name: DirEntryName<'_>,
@@ -594,7 +605,10 @@ mod tests {
     use super::*;
     use crate::test_util::load_test_disk1;
 
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_get_dir_entry_inode_by_name() {
         let fs = load_test_disk1().await;
         let root_inode = fs.read_root_inode().await.unwrap();
@@ -609,14 +623,18 @@ mod tests {
 
         // Check for a few expected entries.
         // '.' always links to self.
-        assert_eq!(lookup(".").await.unwrap().index, root_inode.index);
+        let index = lookup(".").await.unwrap().index;
+        assert_eq!(index, root_inode.index);
         // '..' is normally parent, but in the root dir it's just the
         // root dir again.
-        assert_eq!(lookup("..").await.unwrap().index, root_inode.index);
+        let index = lookup("..").await.unwrap().index;
+        assert_eq!(index, root_inode.index);
         // Don't check specific values of these since they might change
         // if the test disk is regenerated
-        assert!(lookup("empty_file").await.is_ok());
-        assert!(lookup("empty_dir").await.is_ok());
+        let res = lookup("empty_file").await;
+        assert!(res.is_ok());
+        let res = lookup("empty_dir").await;
+        assert!(res.is_ok());
 
         // Check for something that does not exist.
         let err = lookup("does_not_exist").await.unwrap_err();

@@ -37,6 +37,7 @@ pub struct File {
 
 impl File {
     /// Open the file at `path`.
+    #[maybe_async::maybe_async]
     pub(crate) async fn open(
         fs: &Ext4,
         path: Path<'_>,
@@ -82,6 +83,7 @@ impl File {
     /// entire file.
     ///
     /// Returns `Ok(0)` if the end of the file has been reached.
+    #[maybe_async::maybe_async]
     pub async fn read_bytes(
         &mut self,
         buf: &mut [u8],
@@ -106,6 +108,7 @@ impl File {
 
     /// Read bytes from the file at position `pos` into `buf`, returning how many bytes were read. The number may be smaller than the length of the input buffer.
     /// This does not change the position of the file.
+    #[maybe_async::maybe_async]
     pub async fn read_bytes_at(
         &mut self,
         buf: &mut [u8],
@@ -117,6 +120,7 @@ impl File {
     /// Write bytes from `buf` into the file, returning how many bytes
     /// were written. The number may be smaller than the length of the
     /// input buffer.
+    #[maybe_async::maybe_async]
     pub async fn write_bytes(
         &mut self,
         buf: &[u8],
@@ -135,6 +139,7 @@ impl File {
     /// Write bytes from `buf` into the file at position `pos`, returning how many bytes
     /// were written. The number may be smaller than the length of the
     /// input buffer.
+    #[maybe_async::maybe_async]
     pub async fn write_bytes_at(
         &mut self,
         buf: &[u8],
@@ -144,6 +149,7 @@ impl File {
     }
 
     /// Truncate the file to `new_size` bytes.
+    #[maybe_async::maybe_async]
     pub async fn truncate(&mut self, new_size: u64) -> Result<(), Ext4Error> {
         truncate(&self.fs, &mut self.inode, new_size).await?;
         Ok(())
@@ -158,6 +164,7 @@ impl File {
     /// Seek from the start of the file to `position`.
     ///
     /// Seeking past the end of the file is allowed.
+    #[maybe_async::maybe_async]
     pub async fn seek_to(&mut self, position: u64) -> Result<(), Ext4Error> {
         self.position = position;
 
@@ -186,6 +193,7 @@ impl Debug for File {
 
 /// Read from `inode` into `buf` starting at `offset`, returning how many bytes were read.
 /// The number may be smaller than the length of the input buffer if the read is only partially successful (e.g., due to reaching EOF).
+#[maybe_async::maybe_async]
 pub(crate) async fn read_at_inner(
     ext4: &Ext4,
     inode: &Inode,
@@ -268,6 +276,7 @@ pub(crate) async fn read_at_inner(
 
 /// Read from `inode` into `buf` starting at `offset`, returning how many bytes were read.
 /// The number may be smaller than the length of the input buffer if the read is only partially successful (e.g., due to reaching EOF).
+#[maybe_async::maybe_async]
 pub async fn read_at(
     ext4: &Ext4,
     inode: &Inode,
@@ -280,6 +289,7 @@ pub async fn read_at(
 
 /// Write `buf` into `inode` starting at `offset`, returning how many bytes were written.
 /// The number may be smaller than the length of the input buffer if the write is only partially successful (e.g., due to lack of space).
+#[maybe_async::maybe_async]
 pub async fn write_at(
     ext4: &Ext4,
     inode: &mut Inode,
@@ -296,6 +306,7 @@ pub async fn write_at(
     }
 }
 
+#[maybe_async::maybe_async]
 async fn write_at_block_map(
     ext4: &Ext4,
     inode: &mut Inode,
@@ -374,6 +385,7 @@ async fn write_at_block_map(
     }
 }
 
+#[maybe_async::maybe_async]
 async fn write_at_extent(
     ext4: &Ext4,
     inode: &mut Inode,
@@ -405,6 +417,7 @@ async fn write_at_extent(
         }
     }
 
+    #[maybe_async::maybe_async]
     fn bytes_for_blocks(
         num_blocks: usize,
         offset_in_block: usize,
@@ -428,6 +441,7 @@ async fn write_at_extent(
         }
     }
 
+    #[maybe_async::maybe_async]
     async fn write_into_mapped_initialized_extent(
         ext4: &Ext4,
         extent: &Extent,
@@ -503,6 +517,7 @@ async fn write_at_extent(
     }
 
     #[expect(clippy::too_many_arguments)]
+    #[maybe_async::maybe_async]
     async fn write_into_uninitialized_extent(
         _ext4: &Ext4,
         _inode: &Inode,
@@ -520,6 +535,7 @@ async fn write_at_extent(
         unimplemented!()
     }
 
+    #[maybe_async::maybe_async]
     async fn write_into_newly_allocated_extent(
         ext4: &Ext4,
         extent: &Extent,
@@ -848,6 +864,7 @@ async fn write_at_extent(
 /// Truncate `inode` to `new_size` bytes, freeing blocks as necessary.
 /// If `new_size` is larger than the current size, this just updates the size in the inode without allocating blocks
 /// and the new blocks will be allocated on demand when writing to them.
+#[maybe_async::maybe_async]
 pub async fn truncate(
     ext4: &Ext4,
     inode: &mut Inode,

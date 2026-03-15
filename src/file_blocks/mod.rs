@@ -46,6 +46,7 @@ impl FileBlocks {
         }
     }
 
+    #[maybe_async::maybe_async]
     pub(crate) async fn get_block(
         &self,
         block_index: FileBlockIndex,

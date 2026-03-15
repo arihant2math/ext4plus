@@ -7,6 +7,7 @@
 // except according to those terms.
 
 use crate::inode::Inode;
+#[cfg(not(feature = "sync"))]
 use crate::iters::AsyncIterator;
 use crate::iters::file_blocks::FsBlockIndex;
 use crate::util::read_u32le;
@@ -101,6 +102,7 @@ impl BlockMap {
             self.num_blocks_yielded.checked_add(1).unwrap();
     }
 
+    #[maybe_async::maybe_async]
     async fn next_impl(&mut self) -> Result<Option<FsBlockIndex>, Ext4Error> {
         if self.num_blocks_yielded >= self.num_blocks_total {
             self.is_done = true;
@@ -191,6 +193,7 @@ struct IndirectBlockIter {
 }
 
 impl IndirectBlockIter {
+    #[maybe_async::maybe_async]
     async fn new(fs: Ext4, block_index: u32) -> Result<Self, Ext4Error> {
         let mut block = vec![0u8; fs.0.superblock.block_size().to_usize()];
         fs.read_from_block(FsBlockIndex::from(block_index), 0, &mut block)
@@ -235,6 +238,7 @@ struct DoubleIndirectBlockIter {
 }
 
 impl DoubleIndirectBlockIter {
+    #[maybe_async::maybe_async]
     async fn new(fs: Ext4, block_index: u32) -> Result<Self, Ext4Error> {
         Ok(Self {
             indirect_0: IndirectBlockIter::new(fs.clone(), block_index).await?,
@@ -244,6 +248,7 @@ impl DoubleIndirectBlockIter {
         })
     }
 
+    #[maybe_async::maybe_async]
     async fn next_impl(&mut self) -> Result<Option<u32>, Ext4Error> {
         if let Some(indirect_1) = &mut self.indirect_1 {
             if let Some(block_index) = indirect_1.next() {
@@ -274,6 +279,7 @@ struct TripleIndirectBlockIter {
 }
 
 impl TripleIndirectBlockIter {
+    #[maybe_async::maybe_async]
     async fn new(fs: Ext4, block_index: u32) -> Result<Self, Ext4Error> {
         Ok(Self {
             indirect_0: IndirectBlockIter::new(fs.clone(), block_index).await?,
@@ -283,6 +289,7 @@ impl TripleIndirectBlockIter {
         })
     }
 
+    #[maybe_async::maybe_async]
     async fn next_impl(&mut self) -> Result<Option<u32>, Ext4Error> {
         if let Some(indirect_1) = &mut self.indirect_1 {
             if let Some(block_index) = indirect_1.next().await {

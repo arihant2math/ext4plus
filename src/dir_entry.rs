@@ -345,6 +345,7 @@ impl DirEntry {
     ///
     /// If the entry is a symlink, metadata for the symlink itself will
     /// be returned, not the symlink target.
+    #[maybe_async::maybe_async]
     pub async fn metadata(&self) -> Result<Metadata, Ext4Error> {
         let inode = Inode::read(&self.fs, self.inode).await?;
         Ok(inode.metadata())
@@ -466,7 +467,10 @@ mod tests {
     }
 
     #[cfg(feature = "std")]
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_dir_entry_from_bytes() {
         let fs = crate::test_util::load_test_disk1().await;
 

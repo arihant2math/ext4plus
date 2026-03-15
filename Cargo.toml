@@ -37,11 +37,13 @@ anyhow = { version = "1.0.0", features = ["backtrace"] }
 
 [features]
 std = []
+sync = ["maybe-async/is_sync"]
 
 [dependencies]
 async-trait = "0.1.89"
 bitflags = "2.0.0"
 crc = "3.0.0"
+maybe-async = "0.2.10"
 
 [dev-dependencies]
 anyhow.workspace = true

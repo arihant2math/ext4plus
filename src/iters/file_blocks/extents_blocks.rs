@@ -11,6 +11,7 @@ use crate::block_index::{FileBlockIndex, FsBlockIndex};
 use crate::error::{CorruptKind, Ext4Error};
 use crate::extent::Extent;
 use crate::inode::{Inode, InodeIndex};
+#[cfg(not(feature = "sync"))]
 use crate::iters::AsyncIterator;
 use crate::iters::extents::Extents;
 
@@ -63,6 +64,7 @@ impl ExtentsBlocks {
         })
     }
 
+    #[maybe_async::maybe_async]
     async fn next_impl(&mut self) -> Result<Option<FsBlockIndex>, Ext4Error> {
         if self.block_within_file >= self.num_blocks_total {
             self.is_done = true;
@@ -198,7 +200,10 @@ mod tests {
     ///
     /// This only checks hole vs not-hole, since the specific block
     /// indices will change if test data is regenerated.
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_extents_blocks_with_hole() {
         let fs = load_test_disk1().await;
 

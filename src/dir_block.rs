@@ -52,6 +52,7 @@ impl DirBlock<'_> {
     ///
     /// If checksums are enabled for the filesystem, the directory
     /// block's checksum will be verified.
+    #[maybe_async::maybe_async]
     pub(crate) async fn read(&self, block: &mut [u8]) -> Result<(), Ext4Error> {
         let block_size = self.fs.0.superblock.block_size();
         assert_eq!(block.len(), block_size);

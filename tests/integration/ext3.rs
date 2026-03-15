@@ -9,13 +9,17 @@
 use crate::test_util::load_compressed_filesystem;
 use ext4plus::prelude::{AsyncIterator, Ext4, Path};
 
+#[maybe_async::maybe_async]
 pub async fn load_ext3() -> Ext4 {
     load_compressed_filesystem("test_disk_ext3.bin.zst").await
 }
 
 /// Test reading an inode from a filesystem with the minimum inode size
 /// of 128 bytes.
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_read_small_inode() {
     let fs = load_ext3().await;
     let mut dir_iter = fs.read_dir("/").await.unwrap();
@@ -24,13 +28,18 @@ async fn test_read_small_inode() {
 }
 
 /// Test reading files from an htree directory that uses TEA hashes.
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_tea_htree() {
     let fs = load_ext3().await;
 
     let medium_dir = Path::new("/medium_dir");
     for i in 0..1_000 {
         let i = i.to_string();
-        assert_eq!(fs.read_to_string(&medium_dir.join(&i)).await.unwrap(), i);
+        let medium_dir_contents =
+            fs.read_to_string(&medium_dir.join(&i)).await.unwrap();
+        assert_eq!(medium_dir_contents, i);
     }
 }

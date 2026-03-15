@@ -18,13 +18,17 @@ use ext4plus::prelude::{
 };
 use tokio;
 
+#[maybe_async::maybe_async]
 pub async fn load_ext2_rw() -> Ext4Wrapper {
     let (fs, data) =
         load_compressed_filesystem_rw("test_disk_ext2.bin.zst").await;
     Ext4Wrapper(fs, data)
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_write_requires_writer() {
     // Load filesystem without writer.
     let fs = load_compressed_filesystem("test_disk1.bin.zst").await;
@@ -35,7 +39,10 @@ async fn test_write_requires_writer() {
     assert!(matches!(err, Ext4Error::Readonly));
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_write_into_hole() {
     let fses = [load_test_disk1_rw().await, load_ext2_rw().await];
 
@@ -51,7 +58,10 @@ async fn test_write_into_hole() {
     }
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_write_basic() {
     // Load filesystem with writer.
     let fs = load_test_disk1_rw().await;
@@ -77,7 +87,10 @@ async fn test_write_basic() {
     assert_eq!(&data, b"hello, world. We're writing");
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_write_persists_data() {
     let fses = [load_test_disk1_rw().await, load_ext2_rw().await];
 
@@ -95,7 +108,10 @@ async fn test_write_persists_data() {
     }
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_inode_modification_time() {
     let fses = [load_test_disk1_rw().await, load_ext2_rw().await];
     for fs in fses {
@@ -124,7 +140,10 @@ async fn test_inode_modification_time() {
     }
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_inode_creation() {
     let fses = [load_test_disk1_rw().await, load_ext2_rw().await];
     for fs in fses {
@@ -166,7 +185,10 @@ async fn test_inode_creation() {
     }
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_inode_deletion() {
     let fs = load_test_disk1_rw().await;
 
@@ -192,7 +214,10 @@ async fn test_inode_deletion() {
     assert!(matches!(err, Ext4Error::NotFound));
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_new_file_grow() {
     let fses = [load_test_disk1_rw().await, load_ext2_rw().await];
     for fs in fses {
@@ -225,7 +250,10 @@ async fn test_new_file_grow() {
     }
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_new_file_grow2() {
     let fses = [load_test_disk1_rw().await, load_ext2_rw().await];
     for fs in fses {
@@ -270,7 +298,10 @@ async fn test_new_file_grow2() {
     }
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_existing_file_grow() {
     let fses = [load_test_disk1_rw().await, load_ext2_rw().await];
     for fs in fses {
@@ -296,7 +327,10 @@ async fn test_existing_file_grow() {
     }
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_multi_block_write() {
     let fses = [load_test_disk1_rw().await, load_ext2_rw().await];
     for fs in fses {
@@ -338,7 +372,10 @@ async fn test_multi_block_write() {
     }
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_massive_write() {
     let fses = [load_test_disk1_rw().await, load_ext2_rw().await];
     for fs in fses {
@@ -386,7 +423,10 @@ async fn test_massive_write() {
     }
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_init_directory_creates_dot_and_dotdot() {
     let fses = [load_test_disk1_rw().await];
     for fs in fses {
@@ -442,14 +482,18 @@ async fn test_init_directory_creates_dot_and_dotdot() {
             .await
             .unwrap();
         assert_eq!(dotdot.index, root_dir.inode().index);
-        for i in dir_inode.read_dir().unwrap().collect().await {
+        for i in dir_inode.read_dir().unwrap().collect::<Vec<_>>().await {
             i.unwrap();
         }
-        assert_eq!(dir_inode.read_dir().unwrap().collect().await.len(), 2);
+        let len = dir_inode.read_dir().unwrap().collect::<Vec<_>>().await.len();
+        assert_eq!(len, 2);
     }
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_truncate() {
     let fses = [load_test_disk1_rw().await, load_ext2_rw().await];
     for fs in fses {
@@ -476,7 +520,10 @@ async fn test_truncate() {
     }
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_truncate_grow() {
     let fses = [load_test_disk1_rw().await, load_ext2_rw().await];
     for fs in fses {
@@ -504,7 +551,10 @@ async fn test_truncate_grow() {
     }
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_truncate_to_zero() {
     let fses = [load_test_disk1_rw().await, load_ext2_rw().await];
     for fs in fses {
@@ -527,7 +577,10 @@ async fn test_truncate_to_zero() {
     }
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_create_symlink() {
     let fses = [load_test_disk1_rw().await, load_ext2_rw().await];
     for fs in fses {

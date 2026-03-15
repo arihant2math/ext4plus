@@ -39,6 +39,7 @@ impl Journal {
     ///
     /// Note: ext4 is all little-endian, except for the journal, which
     /// is all big-endian.
+    #[maybe_async::maybe_async]
     pub(crate) async fn load(fs: &Ext4) -> Result<Self, Ext4Error> {
         let Some(journal_inode) = fs.0.superblock.journal_inode() else {
             // Return an empty journal if this filesystem does not have
@@ -70,7 +71,10 @@ mod tests {
     use crate::test_util::load_compressed_filesystem;
     use std::sync::Arc;
 
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_journal() {
         let mut fs =
             load_compressed_filesystem("test_disk_4k_block_journal.bin.zst")
@@ -79,10 +83,12 @@ mod tests {
         let test_dir = "/dir500";
 
         // With the journal in place, this directory exists.
-        assert!(fs.exists(test_dir).await.unwrap());
+        let exists = fs.exists(test_dir).await.unwrap();
+        assert!(exists);
 
         // Clear the journal, and verify that the directory no longer exists.
         Arc::get_mut(&mut fs.0).unwrap().journal.block_map.clear();
-        assert!(!fs.exists(test_dir).await.unwrap());
+        let exists = fs.exists(test_dir).await.unwrap();
+        assert!(!exists);
     }
 }
