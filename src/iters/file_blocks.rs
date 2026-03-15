@@ -13,6 +13,7 @@ use alloc::vec::Vec;
 
 use crate::block_index::FsBlockIndex;
 use crate::inode::{Inode, InodeFlags};
+#[cfg(not(feature = "sync"))]
 use crate::iters::AsyncIterator;
 use crate::{Ext4, Ext4Error};
 use block_map::BlockMap;
@@ -45,6 +46,7 @@ impl FileBlocks {
     }
 
     /// Free all blocks used by this extent tree.
+    #[maybe_async::maybe_async]
     pub(crate) async fn free_all(
         mut self,
         ext4: &Ext4,
@@ -65,6 +67,7 @@ impl FileBlocks {
     }
 }
 
+#[cfg(not(feature = "sync"))]
 impl AsyncIterator for FileBlocks {
     type Item = Result<FsBlockIndex, Ext4Error>;
 
@@ -72,6 +75,18 @@ impl AsyncIterator for FileBlocks {
         match self {
             Self(FileBlocksInner::ExtentsBlocks(iter)) => iter.next().await,
             Self(FileBlocksInner::BlockMap(iter)) => iter.next().await,
+        }
+    }
+}
+
+#[cfg(feature = "sync")]
+impl Iterator for FileBlocks {
+    type Item = Result<FsBlockIndex, Ext4Error>;
+
+    fn next(&mut self) -> Option<Result<FsBlockIndex, Ext4Error>> {
+        match self {
+            Self(FileBlocksInner::ExtentsBlocks(iter)) => iter.next(),
+            Self(FileBlocksInner::BlockMap(iter)) => iter.next(),
         }
     }
 }

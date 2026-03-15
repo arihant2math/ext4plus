@@ -235,6 +235,7 @@ impl Superblock {
         data
     }
 
+    #[maybe_async::maybe_async]
     pub(crate) async fn write(&self, ext4: &Ext4) -> Result<(), Ext4Error> {
         let data = self.to_bytes();
         // start byte

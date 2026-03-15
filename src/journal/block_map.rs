@@ -12,6 +12,7 @@ use crate::checksum::Checksum;
 use crate::error::{CorruptKind, Ext4Error, IncompatibleKind};
 use crate::inode::Inode;
 use crate::iters::file_blocks::FileBlocks;
+#[cfg(not(feature = "sync"))]
 use crate::iters::{AsyncIterator, AsyncSkip};
 use crate::journal::block_header::{JournalBlockHeader, JournalBlockType};
 use crate::journal::commit_block::validate_commit_block_checksum;
@@ -26,12 +27,15 @@ use crate::util::usize_from_u32;
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
+#[cfg(feature = "sync")]
+use core::iter::Skip;
 
 /// Map from a block somewhere in the filesystem to a block in the
 /// journal. Both the key and value are absolute block indices.
 pub(super) type BlockMap = BTreeMap<FsBlockIndex, FsBlockIndex>;
 
 /// Read the block map from the journal.
+#[maybe_async::maybe_async]
 pub(super) async fn load_block_map(
     fs: &Ext4,
     superblock: &JournalSuperblock,
@@ -86,7 +90,10 @@ struct BlockMapLoader<'a> {
 
     /// Iterator over blocks in the journal inode. At construction, the
     /// iterator is advanced to the journal start block.
+    #[cfg(not(feature = "sync"))]
     journal_block_iter: AsyncSkip<FileBlocks>,
+    #[cfg(feature = "sync")]
+    journal_block_iter: Skip<FileBlocks>,
 
     /// Current block index.
     block_index: FsBlockIndex,
@@ -145,6 +152,7 @@ impl<'a> BlockMapLoader<'a> {
     ///
     /// Note that depending on the block type, multiple blocks may be
     /// processed.
+    #[maybe_async::maybe_async]
     async fn process_next(&mut self) -> Result<(), Ext4Error> {
         self.fs
             .read_from_block(self.block_index, 0, &mut self.block)
@@ -184,6 +192,7 @@ impl<'a> BlockMapLoader<'a> {
     ///
     /// Note that this will skip the `journal_block_iter` past the data
     /// blocks that follow the descriptor block.
+    #[maybe_async::maybe_async]
     async fn process_descriptor_block(&mut self) -> Result<(), Ext4Error> {
         validate_descriptor_block_checksum(self.superblock, &self.block)?;
 

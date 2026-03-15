@@ -253,6 +253,7 @@ impl Inode {
 
     /// Initialize a new inode with the given index and creation data, and write it to disk.
     /// Assumes that the caller has already allocated the inode and is passing in a valid index.
+    #[maybe_async::maybe_async]
     pub(crate) async fn create(
         index: InodeIndex,
         inode_creation_data: InodeCreationOptions,
@@ -302,6 +303,7 @@ impl Inode {
     }
 
     /// Read an inode.
+    #[maybe_async::maybe_async]
     pub async fn read(
         ext4: &Ext4,
         inode: InodeIndex,
@@ -377,6 +379,7 @@ impl Inode {
     }
 
     /// Write the inode back to disk.
+    #[maybe_async::maybe_async]
     pub async fn write(&mut self, ext4: &Ext4) -> Result<(), Ext4Error> {
         let (block_index, offset_within_block) =
             get_inode_location(ext4, self.index)?;
@@ -397,6 +400,7 @@ impl Inode {
     }
 
     /// Get the target path of a symlink inode.
+    #[maybe_async::maybe_async]
     pub async fn symlink_target(
         &self,
         ext4: &Ext4,

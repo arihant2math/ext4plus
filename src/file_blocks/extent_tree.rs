@@ -285,6 +285,7 @@ impl ExtentNode {
         }
     }
 
+    #[maybe_async::maybe_async]
     pub(crate) async fn write(&self, ext4: &Ext4) -> Result<(), Ext4Error> {
         if let Some(block) = self.block {
             let bytes = self.to_bytes(None)?;
@@ -356,6 +357,7 @@ impl ExtentTree {
     }
 
     /// Get the extent that contains the given block index, if any.
+    #[maybe_async::maybe_async]
     pub(crate) async fn find_extent(
         &self,
         block_index: FileBlockIndex,
@@ -409,6 +411,7 @@ impl ExtentTree {
         }
     }
 
+    #[maybe_async::maybe_async]
     pub(crate) async fn get_block(
         &self,
         block_index: FileBlockIndex,
@@ -425,6 +428,7 @@ impl ExtentTree {
         }
     }
 
+    #[maybe_async::maybe_async]
     async fn last_allocated_extent(
         &self,
     ) -> Result<Option<(Vec<ExtentNode>, Extent)>, Ext4Error> {
@@ -459,6 +463,7 @@ impl ExtentTree {
         }
     }
 
+    #[maybe_async::maybe_async]
     pub(crate) async fn allocate(
         &mut self,
         start: FileBlockIndex,
@@ -530,6 +535,7 @@ impl ExtentTree {
         Ok(())
     }
 
+    #[maybe_async::maybe_async]
     pub(crate) async fn extend(
         &mut self,
         start: FileBlockIndex,
@@ -549,6 +555,7 @@ impl ExtentTree {
     /// - If `block_index` lies inside an extent, returns `(Some(extent), Some(extent))`.
     /// - Otherwise, `prev` is the last extent with `end <= block_index` and `next` is the first
     ///   extent with `start > block_index`.
+    #[maybe_async::maybe_async]
     async fn find_prev_next(
         &self,
         block_index: FileBlockIndex,
@@ -601,6 +608,7 @@ impl ExtentTree {
             (prev, next)
         }
 
+        #[maybe_async::maybe_async]
         async fn leftmost_leaf_first_extent(
             tree: &ExtentTree,
             mut node: ExtentNode,
@@ -629,6 +637,7 @@ impl ExtentTree {
             }
         }
 
+        #[maybe_async::maybe_async]
         async fn rightmost_leaf_last_extent(
             tree: &ExtentTree,
             mut node: ExtentNode,
@@ -789,6 +798,7 @@ impl ExtentTree {
 
     /// Insert a new extent. The new extent must not overlap existing extents.
     /// This will error if the new extent overlaps existing extents.
+    #[maybe_async::maybe_async]
     pub(crate) async fn insert_extent(
         &mut self,
         new_extent: Extent,
@@ -947,6 +957,7 @@ impl ExtentTree {
 
     /// Remove all extents that overlap file-block range [start, start+num_blocks)
     /// and return any freed FsBlockIndex ranges (so caller can free blocks).
+    #[maybe_async::maybe_async]
     pub(crate) async fn remove_extent_range(
         &mut self,
         start: FileBlockIndex,
@@ -1022,6 +1033,7 @@ impl ExtentTree {
     /// Split an existing extent so that there's a boundary at `split_block_within_file`.
     /// If split_block equals extent.block_within_file or end, it's a no-op.
     /// Returns Err if extent not found.
+    #[maybe_async::maybe_async]
     async fn split_extent_at(
         &mut self,
         split_block_within_file: FileBlockIndex,
@@ -1267,6 +1279,7 @@ impl ExtentTree {
 
     /// Mark a (contiguous) file-block range as initialized. Internally this may
     /// split extents and flip `is_initialized` flags for affected extents/blocks.
+    #[maybe_async::maybe_async]
     async fn mark_initialized(
         &mut self,
         start: FileBlockIndex,
@@ -1277,6 +1290,7 @@ impl ExtentTree {
 
     /// Try to merge adjacency-eligible extents (same start_block+num or both initialized/uninitialized adjacent)
     /// starting at `hint_block` to reduce fragmentation.
+    #[maybe_async::maybe_async]
     pub(crate) async fn try_merge_adjacent(
         &mut self,
         hint_block: FileBlockIndex,
@@ -1299,9 +1313,13 @@ mod tests {
         ExtentNode, ExtentNodeEntries, NodeHeader,
     };
     use crate::error::Corrupt;
+    use maybe_async::maybe_async;
     use std::num::NonZeroU32;
 
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_extent_tree() {
         let fs = load_test_disk1_rw().await;
         let root_inode = fs.read_root_inode().await.unwrap();
@@ -1311,7 +1329,10 @@ mod tests {
         assert_eq!(extent.block_within_file, 0);
     }
 
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_extent_tree_insert() {
         let fs = load_test_disk1_rw().await;
         let root_inode = fs.read_root_inode().await.unwrap();
@@ -1329,6 +1350,7 @@ mod tests {
         );
     }
 
+    #[maybe_async::maybe_async]
     async fn root_inode_as_extent_tree(ext4: &Ext4) -> Inode {
         ext4.read_root_inode().await.unwrap()
     }
@@ -1339,6 +1361,7 @@ mod tests {
     /// - leaf0: contains one extent covering file blocks [0, 2)
     /// - leaf1: contains one extent covering file blocks [10, 12)
     /// - root: internal node with two entries keyed at 0 and 10 pointing to the leaf blocks.
+    #[maybe_async::maybe_async]
     async fn build_depth1_tree(
         ext4: &Ext4,
         inode: &Inode,
@@ -1437,7 +1460,10 @@ mod tests {
         (tree, leaf0_block, leaf1_block)
     }
 
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     #[ignore]
     async fn test_extent_tree_internal_nodes_find_extent_and_get_block() {
         let fs = load_test_disk1_rw().await;
@@ -1449,22 +1475,32 @@ mod tests {
         // Within leaf0 extent.
         let e0 = tree.find_extent(0).await.unwrap().unwrap();
         assert_eq!(e0.block_within_file, 0);
-        assert_eq!(tree.get_block(0).await.unwrap(), 100);
-        assert_eq!(tree.get_block(1).await.unwrap(), 101);
-        assert_eq!(tree.find_extent(2).await.unwrap(), None);
+        let block = tree.get_block(0).await.unwrap();
+        assert_eq!(block, 100);
+        let block = tree.get_block(1).await.unwrap();
+        assert_eq!(block, 101);
+        let extent = tree.find_extent(2).await;
+        assert_eq!(extent.unwrap(), None);
 
         // Hole before leaf1.
-        assert_eq!(tree.find_extent(9).await.unwrap(), None);
+        let extent = tree.find_extent(9).await.unwrap();
+        assert_eq!(extent, None);
 
         // Within leaf1 extent.
         let e1 = tree.find_extent(10).await.unwrap().unwrap();
         assert_eq!(e1.block_within_file, 10);
-        assert_eq!(tree.get_block(10).await.unwrap(), 200);
-        assert_eq!(tree.get_block(11).await.unwrap(), 201);
-        assert_eq!(tree.find_extent(12).await.unwrap(), None);
+        let block = tree.get_block(10).await.unwrap();
+        assert_eq!(block, 200);
+        let block = tree.get_block(11).await.unwrap();
+        assert_eq!(block, 201);
+        let extent = tree.find_extent(12).await.unwrap();
+        assert_eq!(extent, None);
     }
 
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     #[ignore]
     async fn test_extent_tree_internal_nodes_selection_boundary_conditions() {
         let fs = load_test_disk1_rw().await;
@@ -1474,17 +1510,22 @@ mod tests {
         let (tree, _leaf0, _leaf1) = build_depth1_tree(&ext4, &inode).await;
 
         // Querying before the first internal key should behave like `find_extent`: returns None.
-        assert_eq!(tree.find_extent(u32::MAX).await.unwrap(), None);
+        let extent = tree.find_extent(u32::MAX).await.unwrap();
+        assert_eq!(extent, None);
         // block_index < 0 is not possible; instead validate that blocks smaller than first key 0
         // are handled via the 0 key. (0 selects child 0)
-        assert!(tree.find_extent(0).await.unwrap().is_some());
+        let extent = tree.find_extent(0).await.unwrap();
+        assert!(extent.is_some());
 
         // Exactly at the second internal key should descend into leaf1.
         let e = tree.find_extent(10).await.unwrap().unwrap();
         assert_eq!(e.block_within_file, 10);
     }
 
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_extent_tree_internal_nodes_checksum_mismatch_is_detected() {
         let fs = load_test_disk1_rw().await;
         let ext4 = fs.0.clone();

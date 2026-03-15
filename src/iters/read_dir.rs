@@ -13,6 +13,7 @@ use crate::dir_block::DirBlock;
 use crate::dir_entry::DirEntry;
 use crate::error::{CorruptKind, Ext4Error};
 use crate::inode::{Inode, InodeFlags, InodeIndex};
+#[cfg(not(feature = "sync"))]
 use crate::iters::AsyncIterator;
 use crate::iters::file_blocks::FileBlocks;
 use crate::path::PathBuf;
@@ -93,6 +94,7 @@ impl ReadDir {
         })
     }
 
+    #[maybe_async::maybe_async]
     async fn next_impl(&mut self) -> Result<Option<DirEntry>, Ext4Error> {
         // Get the block index, or get the next one if not set.
         let block_index = if let Some(block_index) = self.block_index {
@@ -176,7 +178,10 @@ mod tests {
     use super::*;
     use crate::test_util::load_test_disk1;
 
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_read_dir() {
         let fs = load_test_disk1().await;
         let root_inode = fs.read_root_inode().await.unwrap();

@@ -15,6 +15,7 @@ impl BitmapHandle {
     }
 
     /// Query the bitmap for the value of bit `n`.
+    #[maybe_async::maybe_async]
     pub(crate) async fn query(
         &self,
         n: u32,
@@ -30,6 +31,7 @@ impl BitmapHandle {
     }
 
     /// Set the value of bit `n` in the bitmap to `value`.
+    #[maybe_async::maybe_async]
     pub(crate) async fn set(
         &self,
         n: u32,
@@ -52,6 +54,7 @@ impl BitmapHandle {
 
     /// Find the first bit in the bitmap with value `value`, and return its index.
     /// Returns `Ok(None)` if no such bit is found.
+    #[maybe_async::maybe_async]
     pub(crate) async fn find_first(
         &self,
         value: bool,
@@ -98,6 +101,7 @@ impl BitmapHandle {
 
     /// Find the first `n` bits in the bitmap with value `value`, and return the initial index.
     /// Returns `Ok(None)` if no such sequence of bits is found.
+    #[maybe_async::maybe_async]
     pub(crate) async fn find_first_n(
         &self,
         n: u32,
@@ -133,6 +137,7 @@ impl BitmapHandle {
         Ok(None)
     }
 
+    #[maybe_async::maybe_async]
     pub(crate) async fn calc_checksum(
         &self,
         ext4: &Ext4,
@@ -149,16 +154,21 @@ impl BitmapHandle {
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "std")]
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_bitmap_handle() {
         let fs = crate::test_util::load_test_disk1().await;
 
         let bitmap = fs.get_block_bitmap_handle(0);
         let first = bitmap.find_first(false, &fs).await.unwrap();
         // Ensure false
-        assert!(!bitmap.query(first.unwrap(), &fs).await.unwrap());
+        let query = bitmap.query(first.unwrap(), &fs).await.unwrap();
+        assert!(!query);
         let first = bitmap.find_first(true, &fs).await.unwrap();
         // Ensure true
-        assert!(bitmap.query(first.unwrap(), &fs).await.unwrap());
+        let query = bitmap.query(first.unwrap(), &fs).await;
+        assert!(query.unwrap());
     }
 }

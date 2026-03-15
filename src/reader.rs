@@ -11,6 +11,7 @@ use crate::error::BoxedError;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+#[cfg(not(feature = "sync"))]
 use async_trait::async_trait;
 
 use crate::MemIoError;
@@ -19,6 +20,7 @@ use crate::MemIoError;
 /// file or device.
 ///
 /// [`Ext4`]: crate::Ext4
+#[cfg(not(feature = "sync"))]
 #[async_trait]
 pub trait Ext4Read: Send + Sync {
     /// Read bytes into `dst`, starting at `start_byte`.
@@ -33,6 +35,21 @@ pub trait Ext4Read: Send + Sync {
     ) -> Result<(), BoxedError>;
 }
 
+/// Interface used by [`Ext4`] to read the filesystem data from a storage
+/// file or device.
+///
+/// [`Ext4`]: crate::Ext4
+#[cfg(feature = "sync")]
+pub trait Ext4Read: Send + Sync {
+    /// Read bytes into `dst`, starting at `start_byte`.
+    ///
+    /// Exactly `dst.len()` bytes will be read; an error will be
+    /// returned if there is not enough data to fill `dst`, or if the
+    /// data cannot be read for any reason.
+    fn read(&self, start_byte: u64, dst: &mut [u8]) -> Result<(), BoxedError>;
+}
+
+#[cfg(not(feature = "sync"))]
 #[async_trait]
 impl<T> Ext4Read for Arc<T>
 where
@@ -47,6 +64,17 @@ where
     }
 }
 
+#[cfg(feature = "sync")]
+impl<T> Ext4Read for Arc<T>
+where
+    T: Ext4Read,
+{
+    fn read(&self, start_byte: u64, dst: &mut [u8]) -> Result<(), BoxedError> {
+        (**self).read(start_byte, dst)
+    }
+}
+
+#[cfg(not(feature = "sync"))]
 #[async_trait]
 impl Ext4Read for Vec<u8> {
     async fn read(
@@ -65,7 +93,21 @@ impl Ext4Read for Vec<u8> {
     }
 }
 
-#[cfg(all(feature = "std", target_family = "unix"))]
+#[cfg(feature = "sync")]
+impl Ext4Read for Vec<u8> {
+    fn read(&self, start_byte: u64, dst: &mut [u8]) -> Result<(), BoxedError> {
+        read_from_bytes(self, start_byte, dst).ok_or_else(|| {
+            Box::new(MemIoError {
+                start: start_byte,
+                read_len: dst.len(),
+                src_len: self.len(),
+            })
+            .into()
+        })
+    }
+}
+
+#[cfg(all(feature = "std", not(feature = "sync"), target_family = "unix"))]
 #[async_trait]
 impl Ext4Read for std::fs::File {
     async fn read(
@@ -73,6 +115,24 @@ impl Ext4Read for std::fs::File {
         start_byte: u64,
         dst: &mut [u8],
     ) -> Result<(), BoxedError> {
+        use std::os::unix::fs::FileExt;
+
+        let total = self.read_at(dst, start_byte).map_err(Box::new)?;
+        if total != dst.len() {
+            return Err(Box::new(MemIoError {
+                start: start_byte,
+                read_len: dst.len(),
+                src_len: total,
+            })
+            .into());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "std", feature = "sync", target_family = "unix"))]
+impl Ext4Read for std::fs::File {
+    fn read(&self, start_byte: u64, dst: &mut [u8]) -> Result<(), BoxedError> {
         use std::os::unix::fs::FileExt;
 
         let total = self.read_at(dst, start_byte).map_err(Box::new)?;
@@ -101,7 +161,10 @@ fn read_from_bytes(src: &[u8], start_byte: u64, dst: &mut [u8]) -> Option<()> {
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_vec_read() {
         let src = vec![1, 2, 3];
 

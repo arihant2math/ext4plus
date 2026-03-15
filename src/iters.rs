@@ -203,6 +203,7 @@ impl<I: AsyncIterator> AsyncIterator for AsyncSkip<I> {
 ///    nested.
 macro_rules! impl_result_iter {
     ($target:ident, $item:ident) => {
+        #[cfg(not(feature = "sync"))]
         impl crate::iters::AsyncIterator for $target {
             type Item = Result<$item, Ext4Error>;
 
@@ -213,6 +214,30 @@ macro_rules! impl_result_iter {
                     }
 
                     match self.next_impl().await {
+                        Ok(Some(entry)) => return Some(Ok(entry)),
+                        Ok(None) => {
+                            // Continue.
+                        }
+                        Err(err) => {
+                            self.is_done = true;
+                            return Some(Err(err));
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(feature = "sync")]
+        impl Iterator for $target {
+            type Item = Result<$item, Ext4Error>;
+
+            fn next(&mut self) -> Option<Result<$item, Ext4Error>> {
+                loop {
+                    if self.is_done {
+                        return None;
+                    }
+
+                    match self.next_impl() {
                         Ok(Some(entry)) => return Some(Ok(entry)),
                         Ok(None) => {
                             // Continue.
@@ -236,6 +261,7 @@ pub(crate) mod read_dir;
 mod tests {
     use crate::error::{CorruptKind, Ext4Error};
     use crate::iters::AsyncIterator;
+    use maybe_async::maybe_async;
 
     struct I {
         items: Vec<Result<Option<u8>, Ext4Error>>,
@@ -243,6 +269,7 @@ mod tests {
     }
 
     impl I {
+        #[maybe_async::maybe_async]
         async fn next_impl(&mut self) -> Result<Option<u8>, Ext4Error> {
             // Take and return the first element in `items`.
             self.items.remove(0)
@@ -253,19 +280,27 @@ mod tests {
 
     /// Test that if `Ok(None)` is returned, the iterator automatically
     /// skips to the next element.
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_iter_macro_none() {
         let mut iter = I {
             items: vec![Ok(Some(1)), Ok(None), Ok(Some(2))],
             is_done: false,
         };
-        assert_eq!(iter.next().await.unwrap().unwrap(), 1);
-        assert_eq!(iter.next().await.unwrap().unwrap(), 2);
+        let item = iter.next().await.unwrap().unwrap();
+        assert_eq!(item, 1);
+        let item = iter.next().await.unwrap().unwrap();
+        assert_eq!(item, 2);
     }
 
     /// Test that if `Err(_)` is returned, the iterator automatically
     /// stops after yielding that error.
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_iter_macro_error() {
         let mut iter = I {
             items: vec![
@@ -275,23 +310,31 @@ mod tests {
             ],
             is_done: false,
         };
-        assert_eq!(iter.next().await.unwrap().unwrap(), 1);
+        let item = iter.next().await.unwrap();
+        assert_eq!(item.unwrap(), 1);
+        let item = iter.next().await.unwrap();
         assert_eq!(
-            iter.next().await.unwrap().unwrap_err(),
+            item.unwrap_err(),
             CorruptKind::SuperblockMagic
         );
-        assert!(iter.next().await.is_none());
+        let item = iter.next().await;
+        assert!(item.is_none());
     }
 
     /// Test that if `is_done` is set to true, the iterator stops.
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_iter_macro_is_done() {
         let mut iter = I {
             items: vec![Ok(Some(1)), Ok(Some(2))],
             is_done: false,
         };
-        assert_eq!(iter.next().await.unwrap().unwrap(), 1);
+        let item = iter.next().await.unwrap().unwrap();
+        assert_eq!(item, 1);
         iter.is_done = true;
-        assert!(iter.next().await.is_none());
+        let item = iter.next().await;
+        assert!(item.is_none());
     }
 }

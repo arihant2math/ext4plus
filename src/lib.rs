@@ -101,6 +101,7 @@
 )]
 #![warn(missing_docs)]
 #![warn(unreachable_pub)]
+#![allow(clippy::while_let_on_iterator)]
 
 extern crate alloc;
 
@@ -203,6 +204,7 @@ impl Ext4 {
     ///
     /// This reads and validates the superblock, block group
     /// descriptors, and journal. No other data is read.
+    #[maybe_async::maybe_async]
     pub async fn load(reader: Box<dyn Ext4Read>) -> Result<Self, Ext4Error> {
         Self::load_with_writer(reader, None).await
     }
@@ -211,6 +213,7 @@ impl Ext4 {
     ///
     /// This reads and validates the superblock, block group
     /// descriptors, and journal. No other data is read or written.
+    #[maybe_async::maybe_async]
     pub async fn load_with_writer(
         mut reader: Box<dyn Ext4Read>,
         writer: Option<Box<dyn Ext4Write>>,
@@ -249,6 +252,7 @@ impl Ext4 {
 
     #[cfg(all(feature = "std", target_family = "unix"))]
     /// Load an [`Ext4`] instance from a file at the given path.
+    #[maybe_async::maybe_async]
     pub async fn load_from_path<P: AsRef<std::path::Path>>(
         path: P,
     ) -> Result<Self, Ext4Error> {
@@ -279,6 +283,7 @@ impl Ext4 {
     }
 
     /// Read the inode of the root `/` directory.
+    #[maybe_async::maybe_async]
     pub async fn read_root_inode(&self) -> Result<Inode, Ext4Error> {
         let root_inode_index = InodeIndex::new(2).unwrap();
         Inode::read(self, root_inode_index).await
@@ -303,6 +308,7 @@ impl Ext4 {
     ///
     /// If any of these conditions are violated, a `CorruptKind::BlockRead`
     /// error is returned.
+    #[maybe_async::maybe_async]
     async fn read_from_block(
         &self,
         original_block_index: FsBlockIndex,
@@ -363,6 +369,7 @@ impl Ext4 {
     }
 
     /// Read a whole block
+    #[maybe_async::maybe_async]
     async fn read_block(
         &self,
         original_block_index: FsBlockIndex,
@@ -375,6 +382,7 @@ impl Ext4 {
     }
 
     /// Write data to a block.
+    #[maybe_async::maybe_async]
     async fn write_to_block(
         &self,
         original_block_index: FsBlockIndex,
@@ -464,6 +472,7 @@ impl Ext4 {
         BitmapHandle::new(block_group.inode_bitmap_block())
     }
 
+    #[maybe_async::maybe_async]
     async fn update_block_bitmap_checksum(
         &self,
         block_group_index: BlockGroupIndex,
@@ -476,6 +485,7 @@ impl Ext4 {
         Ok(())
     }
 
+    #[maybe_async::maybe_async]
     async fn update_inode_bitmap_checksum(
         &self,
         block_group_index: BlockGroupIndex,
@@ -490,6 +500,7 @@ impl Ext4 {
 
     #[expect(unused)]
     /// Query the bitmap to check if a block is in use.
+    #[maybe_async::maybe_async]
     async fn query_block(
         &self,
         block_index: FsBlockIndex,
@@ -500,6 +511,7 @@ impl Ext4 {
         bitmap_handle.query(block_offset, self).await
     }
 
+    #[maybe_async::maybe_async]
     pub(crate) async fn alloc_inode(
         &self,
         inode_type: FileType,
@@ -590,6 +602,7 @@ impl Ext4 {
         Err(Ext4Error::NoSpace)
     }
 
+    #[maybe_async::maybe_async]
     pub(crate) async fn free_inode(
         &self,
         inode: Inode,
@@ -639,6 +652,7 @@ impl Ext4 {
     }
 
     #[expect(unused)]
+    #[maybe_async::maybe_async]
     pub(crate) async fn alloc_block_num(
         &self,
         block: FsBlockIndex,
@@ -664,6 +678,7 @@ impl Ext4 {
         Ok(())
     }
 
+    #[maybe_async::maybe_async]
     pub(crate) async fn alloc_block(
         &self,
         inode_index: InodeIndex,
@@ -723,6 +738,7 @@ impl Ext4 {
     }
 
     /// Tries to allocate `num_blocks` contiguous blocks.
+    #[maybe_async::maybe_async]
     pub(crate) async fn alloc_contiguous_blocks(
         &self,
         inode_index: InodeIndex,
@@ -784,6 +800,7 @@ impl Ext4 {
     /// Tries to allocate `num_blocks` contiguous blocks
     /// If it can't find `num_blocks` contiguous blocks, it allocates as many as possible instead
     #[expect(unused)]
+    #[maybe_async::maybe_async]
     pub(crate) async fn try_alloc_contiguous_blocks(
         &self,
         inode_index: InodeIndex,
@@ -805,6 +822,7 @@ impl Ext4 {
     }
 
     #[expect(unused)]
+    #[maybe_async::maybe_async]
     pub(crate) async fn clear_block(
         &self,
         block_index: FsBlockIndex,
@@ -813,6 +831,7 @@ impl Ext4 {
         self.write_to_block(block_index, 0, &zeroes).await
     }
 
+    #[maybe_async::maybe_async]
     pub(crate) async fn clear_blocks(
         &self,
         block_index: FsBlockIndex,
@@ -830,6 +849,7 @@ impl Ext4 {
         Ok(())
     }
 
+    #[maybe_async::maybe_async]
     pub(crate) async fn free_block(
         &self,
         block_index: FsBlockIndex,
@@ -854,6 +874,7 @@ impl Ext4 {
     }
 
     /// Frees `num_blocks` contiguous blocks starting at `block_index`.
+    #[maybe_async::maybe_async]
     pub(crate) async fn free_blocks(
         &self,
         block_index: FsBlockIndex,
@@ -884,6 +905,7 @@ impl Ext4 {
         Ok(())
     }
 
+    #[maybe_async::maybe_async]
     pub(crate) async fn delete_file(
         &self,
         inode: Inode,
@@ -894,6 +916,7 @@ impl Ext4 {
     }
 
     /// Create a new inode of the given type, and return its index.
+    #[maybe_async::maybe_async]
     pub async fn create_inode(
         &self,
         options: InodeCreationOptions,
@@ -909,6 +932,7 @@ impl Ext4 {
     ///
     /// Fails with `FileTooLarge` if the size of the file is too large
     /// to fit in a [`usize`].
+    #[maybe_async::maybe_async]
     pub async fn read_inode_file(
         &self,
         inode: &Inode,
@@ -932,6 +956,7 @@ impl Ext4 {
     }
 
     /// Follow a path to get an inode.
+    #[maybe_async::maybe_async]
     pub async fn path_to_inode(
         &self,
         path: Path<'_>,
@@ -941,6 +966,7 @@ impl Ext4 {
     }
 
     /// Create a symbolic link at `path` pointing to `target`.
+    #[maybe_async::maybe_async]
     pub async fn symlink(
         &self,
         parent_dir: &Dir,
@@ -994,6 +1020,7 @@ impl Ext4 {
     ///
     /// This is not an exhaustive list of errors, see the
     /// [crate documentation](crate#errors).
+    #[maybe_async::maybe_async]
     pub async fn canonicalize<'p, P>(
         &self,
         path: P,
@@ -1018,6 +1045,7 @@ impl Ext4 {
     ///
     /// This is not an exhaustive list of errors, see the
     /// [crate documentation](crate#errors).
+    #[maybe_async::maybe_async]
     pub async fn open<'p, P>(&self, path: P) -> Result<File, Ext4Error>
     where
         P: TryInto<Path<'p>>,
@@ -1037,10 +1065,12 @@ impl Ext4 {
     ///
     /// This is not an exhaustive list of errors, see the
     /// [crate documentation](crate#errors).
+    #[maybe_async::maybe_async]
     pub async fn read<'p, P>(&self, path: P) -> Result<Vec<u8>, Ext4Error>
     where
         P: TryInto<Path<'p>>,
     {
+        #[maybe_async::maybe_async]
         async fn inner(
             fs: &Ext4,
             path: Path<'_>,
@@ -1072,6 +1102,7 @@ impl Ext4 {
     ///
     /// This is not an exhaustive list of errors, see the
     /// [crate documentation](crate#errors).
+    #[maybe_async::maybe_async]
     pub async fn read_to_string<'p, P>(
         &self,
         path: P,
@@ -1079,6 +1110,7 @@ impl Ext4 {
     where
         P: TryInto<Path<'p>>,
     {
+        #[maybe_async::maybe_async]
         async fn inner(fs: &Ext4, path: Path<'_>) -> Result<String, Ext4Error> {
             let content = fs.read(path).await?;
             String::from_utf8(content).map_err(|_| Ext4Error::NotUtf8)
@@ -1102,10 +1134,12 @@ impl Ext4 {
     ///
     /// This is not an exhaustive list of errors, see the
     /// [crate documentation](crate#errors).
+    #[maybe_async::maybe_async]
     pub async fn read_link<'p, P>(&self, path: P) -> Result<PathBuf, Ext4Error>
     where
         P: TryInto<Path<'p>>,
     {
+        #[maybe_async::maybe_async]
         async fn inner(
             fs: &Ext4,
             path: Path<'_>,
@@ -1131,10 +1165,12 @@ impl Ext4 {
     ///
     /// This is not an exhaustive list of errors, see the
     /// [crate documentation](crate#errors).
+    #[maybe_async::maybe_async]
     pub async fn read_dir<'p, P>(&self, path: P) -> Result<ReadDir, Ext4Error>
     where
         P: TryInto<Path<'p>>,
     {
+        #[maybe_async::maybe_async]
         async fn inner(
             fs: &Ext4,
             path: Path<'_>,
@@ -1164,10 +1200,12 @@ impl Ext4 {
     ///
     /// This is not an exhaustive list of errors, see the
     /// [crate documentation](crate#errors).
+    #[maybe_async::maybe_async]
     pub async fn exists<'p, P>(&self, path: P) -> Result<bool, Ext4Error>
     where
         P: TryInto<Path<'p>>,
     {
+        #[maybe_async::maybe_async]
         async fn inner(fs: &Ext4, path: Path<'_>) -> Result<bool, Ext4Error> {
             match fs.path_to_inode(path, FollowSymlinks::All).await {
                 Ok(_) => Ok(true),
@@ -1190,10 +1228,12 @@ impl Ext4 {
     ///
     /// This is not an exhaustive list of errors, see the
     /// [crate documentation](crate#errors).
+    #[maybe_async::maybe_async]
     pub async fn metadata<'p, P>(&self, path: P) -> Result<Metadata, Ext4Error>
     where
         P: TryInto<Path<'p>>,
     {
+        #[maybe_async::maybe_async]
         async fn inner(
             fs: &Ext4,
             path: Path<'_>,
@@ -1221,6 +1261,7 @@ impl Ext4 {
     ///
     /// This is not an exhaustive list of errors, see the
     /// [crate documentation](crate#errors).
+    #[maybe_async::maybe_async]
     pub async fn symlink_metadata<'p, P>(
         &self,
         path: P,
@@ -1228,6 +1269,7 @@ impl Ext4 {
     where
         P: TryInto<Path<'p>>,
     {
+        #[maybe_async::maybe_async]
         async fn inner(
             fs: &Ext4,
             path: Path<'_>,
@@ -1262,50 +1304,46 @@ mod tests {
     use crate::test_util::load_test_disk1_rw_no_fsck;
     use test_util::load_test_disk1;
 
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_load_errors() {
         // Not enough data.
-        assert!(matches!(
-            Ext4::load(Box::new(vec![])).await.unwrap_err(),
-            Ext4Error::Io(_)
-        ));
+        let err = Ext4::load(Box::new(vec![])).await.unwrap_err();
+        assert!(matches!(err, Ext4Error::Io(_)));
 
         // Invalid superblock.
-        assert_eq!(
-            Ext4::load(Box::new(vec![0; 2048])).await.unwrap_err(),
-            CorruptKind::SuperblockMagic
-        );
+        let err = Ext4::load(Box::new(vec![0; 2048])).await.unwrap_err();
+        assert_eq!(err, CorruptKind::SuperblockMagic);
 
         // Not enough data to read the block group descriptors.
         let mut fs_data = vec![0; 2048];
         fs_data[1024..2048]
             .copy_from_slice(include_bytes!("../test_data/raw_superblock.bin"));
-        assert!(matches!(
-            Ext4::load(Box::new(fs_data.clone())).await.unwrap_err(),
-            Ext4Error::Io(_)
-        ));
+        let err = Ext4::load(Box::new(fs_data.clone())).await.unwrap_err();
+        assert!(matches!(err, Ext4Error::Io(_)));
 
         // Invalid block group descriptor checksum.
         fs_data.resize(3048usize, 0u8);
-        assert_eq!(
-            Ext4::load(Box::new(fs_data.clone())).await.unwrap_err(),
-            CorruptKind::BlockGroupDescriptorChecksum(0)
-        );
+        let err = Ext4::load(Box::new(fs_data.clone())).await.unwrap_err();
+        assert_eq!(err, CorruptKind::BlockGroupDescriptorChecksum(0));
     }
 
     /// Test that loading the data from
     /// https://github.com/nicholasbishop/ext4-view-rs/issues/280 does not
     /// panic.
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_invalid_ext4_data() {
         // Fill in zeros for the first 1024 bytes, then add the test data.
         let mut data = vec![0; 1024];
         data.extend(include_bytes!("../test_data/not_ext4.bin"));
 
-        assert_eq!(
-            Ext4::load(Box::new(data)).await.unwrap_err(),
-            CorruptKind::InvalidBlockSize
-        );
+        let err = Ext4::load(Box::new(data)).await.unwrap_err();
+        assert_eq!(err, CorruptKind::InvalidBlockSize);
     }
 
     fn block_read_error(
@@ -1322,52 +1360,60 @@ mod tests {
     }
 
     /// Test that reading from the first 1024 bytes of the file fails.
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_read_from_block_first_1024() {
         let fs = load_test_disk1().await;
         let mut dst = vec![0; 1];
-        assert_eq!(
-            fs.read_from_block(0, 1023, &mut dst).await.unwrap_err(),
-            block_read_error(0, 1023, 1),
-        );
+        let err = fs.read_from_block(0, 1023, &mut dst).await.unwrap_err();
+        assert_eq!(err, block_read_error(0, 1023, 1),);
     }
 
     /// Test that reading past the last block of the file fails.
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_read_from_block_past_file_end() {
         let fs = load_test_disk1().await;
         let mut dst = vec![0; 1024];
-        assert_eq!(
-            fs.read_from_block(999_999_999, 0, &mut dst)
-                .await
-                .unwrap_err(),
-            block_read_error(999_999_999, 0, 1024),
-        );
+        let err = fs
+            .read_from_block(999_999_999, 0, &mut dst)
+            .await
+            .unwrap_err();
+        assert_eq!(err, block_read_error(999_999_999, 0, 1024),);
     }
 
     /// Test that reading at an offset >= the block size fails.
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_read_from_block_invalid_offset() {
         let fs = load_test_disk1().await;
         let mut dst = vec![0; 1024];
-        assert_eq!(
-            fs.read_from_block(1, 1024, &mut dst).await.unwrap_err(),
-            block_read_error(1, 1024, 1024),
-        );
+        let err = fs.read_from_block(1, 1024, &mut dst).await.unwrap_err();
+        assert_eq!(err, block_read_error(1, 1024, 1024),);
     }
 
     /// Test that reading past the end of the block fails.
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_read_from_block_past_block_end() {
         let fs = load_test_disk1().await;
         let mut dst = vec![0; 25];
-        assert_eq!(
-            fs.read_from_block(1, 1000, &mut dst).await.unwrap_err(),
-            block_read_error(1, 1000, 25),
-        );
+        let err = fs.read_from_block(1, 1000, &mut dst).await.unwrap_err();
+        assert_eq!(err, block_read_error(1, 1000, 25),);
     }
 
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_path_to_inode() {
         let fs = load_test_disk1().await;
 
@@ -1380,18 +1426,16 @@ mod tests {
         assert_eq!(inode.index.get(), 2);
 
         // Successful lookup.
-        assert!(
-            fs.path_to_inode(Path::try_from("/empty_file").unwrap(), follow)
-                .await
-                .is_ok()
-        );
+        let res = fs
+            .path_to_inode(Path::try_from("/empty_file").unwrap(), follow)
+            .await;
+        assert!(res.is_ok());
 
         // Successful lookup with a "." component.
-        assert!(
-            fs.path_to_inode(Path::try_from("/./empty_file").unwrap(), follow)
-                .await
-                .is_ok()
-        );
+        let res = fs
+            .path_to_inode(Path::try_from("/./empty_file").unwrap(), follow)
+            .await;
+        assert!(res.is_ok());
 
         // Successful lookup with a ".." component.
         let inode = fs
@@ -1401,43 +1445,42 @@ mod tests {
         assert_eq!(inode.index.get(), 2);
 
         // Successful lookup with symlink.
-        assert!(
-            fs.path_to_inode(Path::try_from("/sym_simple").unwrap(), follow)
-                .await
-                .is_ok()
-        );
+        let res = fs
+            .path_to_inode(Path::try_from("/sym_simple").unwrap(), follow)
+            .await;
+        assert!(res.is_ok());
 
         // Error: not an absolute path.
-        assert!(
-            fs.path_to_inode(Path::try_from("empty_file").unwrap(), follow)
-                .await
-                .is_err()
-        );
+        let res = fs
+            .path_to_inode(Path::try_from("empty_file").unwrap(), follow)
+            .await;
+        assert!(res.is_err());
 
         // Error: invalid child of a valid directory.
-        assert!(
-            fs.path_to_inode(
+        let res = fs
+            .path_to_inode(
                 Path::try_from("/empty_dir/does_not_exist").unwrap(),
-                follow
+                follow,
             )
-            .await
-            .is_err()
-        );
+            .await;
+        assert!(res.is_err());
 
         // Error: attempted to lookup child of a regular file.
-        assert!(
-            fs.path_to_inode(
+        let res = fs
+            .path_to_inode(
                 Path::try_from("/empty_file/does_not_exist").unwrap(),
-                follow
+                follow,
             )
-            .await
-            .is_err()
-        );
+            .await;
+        assert!(res.is_err());
 
         // TODO: add deeper paths to the test disk and test here.
     }
 
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_inode_equivalence() {
         let fs = load_test_disk1().await;
 
@@ -1453,7 +1496,10 @@ mod tests {
         assert_eq!(inode.inode_data, data);
     }
 
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_block_modification() {
         // Modify a block and check that the change is visible when reading the block again.
         let fs = load_test_disk1_rw_no_fsck().await;

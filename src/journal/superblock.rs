@@ -10,6 +10,7 @@ use crate::Ext4;
 use crate::checksum::Checksum;
 use crate::error::{CorruptKind, Ext4Error, IncompatibleKind};
 use crate::inode::Inode;
+#[cfg(not(feature = "sync"))]
 use crate::iters::AsyncIterator;
 use crate::iters::file_blocks::FileBlocks;
 use crate::journal::block_header::{JournalBlockHeader, JournalBlockType};
@@ -66,6 +67,7 @@ impl JournalSuperblock {
     /// * The superblock cannot be read from the filesystem.
     /// * `JournalSuperblock::read_bytes` fails.
     /// * The journal's block size does not match the filesystem block size.
+    #[maybe_async::maybe_async]
     pub(super) async fn load(
         fs: &Ext4,
         journal_inode: &Inode,
@@ -203,7 +205,10 @@ mod tests {
     use super::*;
     use crate::test_util::load_compressed_filesystem;
 
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_load_journal_superblock() {
         let fs =
             load_compressed_filesystem("test_disk_4k_block_journal.bin.zst")

@@ -47,6 +47,7 @@ impl<T: BlockMapEntry> IndirectBlock<T> {
         }
     }
 
+    #[maybe_async::maybe_async]
     async fn get(&self, index: usize, fs: &Ext4) -> Result<T, Ext4Error> {
         let block_data = fs.read_block(u64::from(self.block_index.0)).await?;
         let entry_index = index.checked_mul(4).unwrap();
@@ -60,6 +61,7 @@ impl<T: BlockMapEntry> IndirectBlock<T> {
         Ok(T::from_index(BlockIndex(entry_block_index)))
     }
 
+    #[maybe_async::maybe_async]
     async fn set(
         &mut self,
         index: usize,
@@ -182,6 +184,7 @@ impl BlockMap {
         data
     }
 
+    #[maybe_async::maybe_async]
     pub(crate) async fn get_block(
         &self,
         file_block_index: FileBlockIndex,
@@ -301,6 +304,7 @@ impl BlockMap {
         }
     }
 
+    #[maybe_async::maybe_async]
     pub(crate) async fn set_block(
         &mut self,
         file_block_index: FileBlockIndex,
@@ -480,6 +484,7 @@ impl BlockMap {
 
     /// Clear a range of file blocks from the mapping and return the corresponding
     /// allocated filesystem blocks that were removed.
+    #[maybe_async::maybe_async]
     pub(crate) async fn remove_range(
         &mut self,
         start: FileBlockIndex,

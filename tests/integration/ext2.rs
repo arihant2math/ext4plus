@@ -10,6 +10,7 @@ use crate::expected_holes_data;
 use crate::test_util::load_compressed_filesystem;
 use ext4plus::Ext4;
 
+#[maybe_async::maybe_async]
 pub async fn load_ext2() -> Ext4 {
     load_compressed_filesystem("test_disk_ext2.bin.zst").await
 }
@@ -28,25 +29,34 @@ fn gen_big_file(num_blocks: u32) -> Vec<u8> {
     file
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_read_small_file() {
     let fs = load_ext2().await;
-    assert_eq!(fs.read("/small_file").await.unwrap(), b"hello, world!");
+    let text = fs.read("/small_file").await.unwrap();
+    assert_eq!(text, b"hello, world!");
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_read_big_file() {
     let fs = load_ext2().await;
     let num_blocks = 12 + 256 + (256 * 256) + (256 * 16);
-    assert_eq!(
-        fs.read("/big_file").await.unwrap(),
-        gen_big_file(num_blocks)
-    );
+    let text = fs.read("/big_file").await.unwrap();
+    assert_eq!(text, gen_big_file(num_blocks));
 }
 
-#[tokio::test]
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_read_file_with_holes() {
     let fs = load_ext2().await;
+    let holes = fs.read("/holes").await.unwrap();
 
-    assert_eq!(fs.read("/holes").await.unwrap(), expected_holes_data());
+    assert_eq!(holes, expected_holes_data());
 }

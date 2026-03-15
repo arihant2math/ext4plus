@@ -14,6 +14,7 @@ use crate::dir_entry_hash::HashAlg;
 use crate::error::{CorruptKind, Ext4Error};
 use crate::extent::Extent;
 use crate::inode::{Inode, InodeFlags, InodeIndex};
+#[cfg(not(feature = "sync"))]
 use crate::iters::AsyncIterator;
 use crate::iters::extents::Extents;
 use crate::iters::file_blocks::FileBlocks;
@@ -180,6 +181,7 @@ impl<'a> InternalNode<'a> {
 
 /// Read the block containing the root node of an htree into
 /// `block`. This is always the first block of the file.
+#[maybe_async::maybe_async]
 async fn read_root_block(
     fs: &Ext4,
     inode: &Inode,
@@ -243,6 +245,7 @@ fn read_dot_or_dotdot(
 }
 
 /// Find the extent within a file that includes the given child `block`.
+#[maybe_async::maybe_async]
 async fn find_extent_for_block(
     fs: &Ext4,
     inode: &Inode,
@@ -265,6 +268,7 @@ async fn find_extent_for_block(
 }
 
 /// Convert from a block offset within a file to an absolute block index.
+#[maybe_async::maybe_async]
 async fn block_from_file_block(
     fs: &Ext4,
     inode: &Inode,
@@ -281,7 +285,8 @@ async fn block_from_file_block(
             .ok_or(CorruptKind::DirEntry(inode.index))?;
         Ok(absolute_block)
     } else {
-        let block_map = FileBlocks::new(fs.clone(), inode)?;
+        #[allow(unused_mut)]
+        let mut block_map = FileBlocks::new(fs.clone(), inode)?;
         block_map
             .nth(usize_from_u32(relative_block))
             .await
@@ -293,6 +298,7 @@ async fn block_from_file_block(
 ///
 /// On success, `block` will contain the leaf node's directory block
 /// data.
+#[maybe_async::maybe_async]
 async fn find_leaf_node(
     fs: &Ext4,
     inode: &Inode,
@@ -358,6 +364,7 @@ async fn find_leaf_node(
 /// Returns [`Ext4Error::NotFound`] if the entry doesn't exist.
 ///
 /// Panics if the directory doesn't have an htree.
+#[maybe_async::maybe_async]
 pub(crate) async fn get_dir_entry_via_htree(
     fs: &Ext4,
     inode: &Inode,
@@ -412,6 +419,7 @@ pub(crate) async fn get_dir_entry_via_htree(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maybe_async::maybe_async;
 
     #[cfg(feature = "std")]
     use crate::{FollowSymlinks, Path, ReadDir};
@@ -497,7 +505,10 @@ mod tests {
     }
 
     #[cfg(feature = "std")]
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_read_dot_or_dotdot() {
         let fs = crate::test_util::load_test_disk1().await;
 
@@ -577,6 +588,7 @@ mod tests {
     ///
     /// Returns the number of entries.
     #[cfg(feature = "std")]
+    #[maybe_async::maybe_async]
     async fn compare_all_entries(fs: &Ext4, dir: Path<'_>) -> usize {
         let dir_inode =
             fs.path_to_inode(dir, FollowSymlinks::All).await.unwrap();
@@ -598,24 +610,32 @@ mod tests {
 
     // TODO: Debug
     #[cfg(feature = "std")]
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     #[ignore]
     async fn test_get_dir_entry_via_htree() {
         let fs = crate::test_util::load_test_disk1().await;
 
         // Resolve paths in `/medium_dir` via htree.
         let medium_dir = Path::new("/medium_dir");
-        assert_eq!(compare_all_entries(&fs, medium_dir).await, 1_002);
+        let cmp = compare_all_entries(&fs, medium_dir).await;
+        assert_eq!(cmp, 1_002);
 
         // Resolve paths in `/big_dir` via htree.
         let big_dir = Path::new("/big_dir");
-        assert_eq!(compare_all_entries(&fs, big_dir).await, 10_002);
+        let cmp = compare_all_entries(&fs, big_dir).await;
+        assert_eq!(cmp, 10_002);
     }
 
     // TODO: Debug
     /// Test `block_from_file_block` with a file that uses extents.
     #[cfg(feature = "std")]
-    #[tokio::test]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     #[ignore]
     async fn test_block_from_file_block() {
         let fs = crate::test_util::load_test_disk1().await;
@@ -685,16 +705,23 @@ mod tests {
         );
 
         // Blocks in extent 0.
-        assert_eq!(block_from_file_block(&fs, &inode, 0).await.unwrap(), 2543);
-        assert_eq!(block_from_file_block(&fs, &inode, 1).await.unwrap(), 2544);
-        assert_eq!(block_from_file_block(&fs, &inode, 22).await.unwrap(), 2565);
+        let block = block_from_file_block(&fs, &inode, 0).await;
+        assert_eq!(block.unwrap(), 2543);
+        let block = block_from_file_block(&fs, &inode, 1).await;
+        assert_eq!(block.unwrap(), 2544);
+        let block = block_from_file_block(&fs, &inode, 22).await;
+        assert_eq!(block.unwrap(), 2565);
 
         // Blocks in extent 1.
-        assert_eq!(block_from_file_block(&fs, &inode, 23).await.unwrap(), 11);
-        assert_eq!(block_from_file_block(&fs, &inode, 24).await.unwrap(), 12);
-        assert_eq!(block_from_file_block(&fs, &inode, 69).await.unwrap(), 57);
+        let block = block_from_file_block(&fs, &inode, 23).await;
+        assert_eq!(block.unwrap(), 11);
+        let block = block_from_file_block(&fs, &inode, 24).await;
+        assert_eq!(block.unwrap(), 12);
+        let block = block_from_file_block(&fs, &inode, 69).await;
+        assert_eq!(block.unwrap(), 57);
 
         // Invalid block.
-        assert!(block_from_file_block(&fs, &inode, 70).await.is_err());
+        let block = block_from_file_block(&fs, &inode, 70).await;
+        assert!(block.is_err());
     }
 }
