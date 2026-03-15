@@ -198,9 +198,7 @@ pub(crate) async fn add_dir_entry_non_htree(
 
 /// Remove an item from a directory without an htree.
 ///
-/// This edits directory entry bytes in-place. It will error with
-/// [`Ext4Error::Readonly`] if the removal would require freeing a block
-/// (which this crate does not implement).
+/// This edits directory entry bytes in-place.
 #[maybe_async::maybe_async]
 pub(crate) async fn remove_dir_entry_non_htree(
     fs: &Ext4,
