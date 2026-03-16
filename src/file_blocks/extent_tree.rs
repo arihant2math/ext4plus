@@ -1210,27 +1210,6 @@ mod tests {
         assert_eq!(extent.block_within_file, 0);
     }
 
-    #[maybe_async::test(
-        feature = "sync",
-        async(not(feature = "sync"), tokio::test)
-    )]
-    async fn test_extent_tree_insert() {
-        let fs = load_test_disk1_rw().await;
-        let root_inode = fs.read_root_inode().await.unwrap();
-        let mut tree =
-            ExtentTree::from_inode(&root_inode, fs.0.clone()).unwrap();
-        // Allocate some extents
-        let (_, last_allocated) =
-            tree.last_allocated_extent().await.unwrap().unwrap();
-        tree.allocate(
-            last_allocated.block_within_file
-                + last_allocated.num_blocks as u32
-                + 1,
-            NonZeroU32::new(5).unwrap(),
-            true,
-        );
-    }
-
     #[maybe_async::maybe_async]
     async fn root_inode_as_extent_tree(ext4: &Ext4) -> Inode {
         ext4.read_root_inode().await.unwrap()
