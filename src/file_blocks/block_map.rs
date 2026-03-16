@@ -2,6 +2,7 @@ use crate::block_index::{FileBlockIndex, FsBlockIndex};
 use crate::util::{read_u32le, usize_from_u32};
 use crate::{Ext4, Ext4Error, Inode};
 
+use crate::error::CorruptKind;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::num::{NonZeroU32, NonZeroUsize};
@@ -52,10 +53,7 @@ impl<T: BlockMapEntry> IndirectBlock<T> {
         let block_data = fs.read_block(u64::from(self.block_index.0)).await?;
         let entry_index = index.checked_mul(4).unwrap();
         if entry_index >= block_data.len() {
-            todo!(
-                "Handle out-of-bounds access for indirect block index {}",
-                index
-            );
+            return Err(CorruptKind::BlockMap(self.block_index.value()))?;
         }
         let entry_block_index = read_u32le(&block_data, entry_index);
         Ok(T::from_index(BlockIndex(entry_block_index)))
@@ -72,10 +70,7 @@ impl<T: BlockMapEntry> IndirectBlock<T> {
             fs.read_block(u64::from(self.block_index.0)).await?;
         let entry_index = index.checked_mul(4).unwrap();
         if entry_index >= block_data.len() {
-            todo!(
-                "Handle out-of-bounds access for indirect block index {}",
-                index
-            );
+            return Err(CorruptKind::BlockMap(self.block_index.value()))?;
         }
         block_data[entry_index..entry_index.checked_add(4).unwrap()]
             .copy_from_slice(&block_index.value().to_le_bytes());

@@ -314,8 +314,11 @@ pub(crate) enum CorruptKind {
     /// The target of a symlink is not a valid path.
     SymlinkTarget(InodeIndex),
 
-    /// The number of blocks in a file exceeds 2^32.
+    /// The number of blocks in a block-map file exceeds 2^32.
     TooManyBlocksInFile,
+
+    /// Invalid block access in block-map file.
+    BlockMap(u32),
 
     /// An extent's magic is invalid.
     ExtentMagic(InodeIndex),
@@ -504,6 +507,12 @@ impl Display for CorruptKind {
                 write!(f, "inode {inode} has an invalid symlink path")
             }
             Self::TooManyBlocksInFile => write!(f, "too many blocks in file"),
+            Self::BlockMap(block) => {
+                write!(
+                    f,
+                    "invalid block access in block-map file at block: {block}"
+                )
+            }
             Self::ExtentMagic(inode) => {
                 write!(f, "extent in inode {inode} has invalid magic")
             }
