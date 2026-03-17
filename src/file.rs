@@ -332,7 +332,12 @@ async fn write_at_block_map(
                 // Hole: need to allocate a block.
                 let new_fs_block = ext4.alloc_block(inode.index).await?;
                 block_map.set_block(start_block, new_fs_block).await?;
-                inode.set_blocks(inode.blocks().checked_add(1).unwrap());
+                inode.set_blocks(
+                    inode
+                        .blocks()
+                        .checked_add(1)
+                        .ok_or(Ext4Error::FileTooLarge)?,
+                );
                 inode.set_inline_data(block_map.to_bytes());
                 inode.write(ext4).await?;
                 new_fs_block
@@ -356,7 +361,9 @@ async fn write_at_block_map(
             .checked_add(u64_from_usize(to_write))
             .ok_or(Ext4Error::FileTooLarge)?;
         let fs_block = match block_map
-            .get_block(start_block.checked_add(1).ok_or(Ext4Error::NoSpace)?)
+            .get_block(
+                start_block.checked_add(1).ok_or(Ext4Error::FileTooLarge)?,
+            )
             .await?
         {
             0 => {
@@ -364,7 +371,9 @@ async fn write_at_block_map(
                 let new_fs_block = ext4.alloc_block(inode.index).await?;
                 block_map
                     .set_block(
-                        start_block.checked_add(1).unwrap(),
+                        start_block
+                            .checked_add(1)
+                            .ok_or(Ext4Error::FileTooLarge)?,
                         new_fs_block,
                     )
                     .await?;
