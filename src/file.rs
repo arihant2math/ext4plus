@@ -930,10 +930,7 @@ pub async fn truncate(
                             }
                         }
                         inode.set_blocks(
-                            inode
-                                .blocks()
-                                .checked_sub(u64::from(len))
-                                .unwrap(),
+                            inode.blocks().checked_sub(u64::from(len)).unwrap(),
                         );
                     }
                 }
