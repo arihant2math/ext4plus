@@ -230,7 +230,7 @@ async fn test_new_file_grow() {
                 uid: 0,
                 gid: 0,
                 time: Default::default(),
-                flags: InodeFlags::INLINE_DATA,
+                flags: InodeFlags::empty(),
             })
             .await
             .unwrap();
@@ -266,7 +266,7 @@ async fn test_new_file_grow2() {
                 uid: 0,
                 gid: 0,
                 time: Default::default(),
-                flags: InodeFlags::INLINE_DATA,
+                flags: InodeFlags::empty(),
             })
             .await
             .unwrap();

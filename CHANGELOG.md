@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Disable writing when unsupported RO features are present to prevent corruption.
+- fsck fixes
 
 ## 0.1.0-alpha.6
 

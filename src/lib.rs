@@ -997,7 +997,7 @@ impl Ext4 {
                 .copy_from_slice(target.as_ref());
             inode.set_inline_data(target_bytes);
             inode.set_size_in_bytes(u64_from_usize(target.as_ref().len()));
-            inode.set_flags(InodeFlags::INLINE_DATA);
+            inode.set_flags(inode.flags().difference(InodeFlags::EXTENTS));
             inode.write(self).await?;
         } else {
             // Slow symlink: store the target in a data block.
