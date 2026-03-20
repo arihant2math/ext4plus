@@ -19,6 +19,23 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::num::NonZeroU32;
 
+/// Find the child index to descend into for `block_index`.
+///
+/// Returns the index of the last internal node with `block_within_file <= block_index`.
+fn find_child_index(
+    nodes: &[ExtentInternalNode],
+    block_index: FileBlockIndex,
+) -> Option<usize> {
+    let mut best_index = None;
+    for (i, node) in nodes.iter().enumerate() {
+        if node.block_within_file > block_index {
+            break;
+        }
+        best_index = Some(i);
+    }
+    best_index
+}
+
 /// Size of each entry within an extent node (including the header
 /// entry).
 const ENTRY_SIZE_IN_BYTES: usize = 12;
@@ -382,20 +399,11 @@ impl ExtentTree {
                     return Ok(None);
                 }
                 ExtentNodeEntries::Internal(internal_nodes) => {
-                    // Internal nodes are sorted by `block_within_file`.
-                    // Find the last internal node whose `block_within_file` is less than or equal to `block_index`.
-                    let mut next_node_index = None;
-                    for (i, internal_node) in internal_nodes.iter().enumerate()
-                    {
-                        if internal_node.block_within_file > block_index {
-                            break;
-                        }
-                        next_node_index = Some(i);
-                    }
-                    let next_node_index = match next_node_index {
-                        Some(i) => i,
-                        None => return Ok(None),
-                    };
+                    let next_node_index =
+                        match find_child_index(internal_nodes, block_index) {
+                            Some(i) => i,
+                            None => return Ok(None),
+                        };
                     let next_node_block = internal_nodes[next_node_index].block;
                     let next_node_data =
                         self.ext4.read_block(next_node_block).await?;
@@ -441,23 +449,6 @@ impl ExtentTree {
         &self,
         block_index: FileBlockIndex,
     ) -> Result<(Option<Extent>, Option<Extent>), Ext4Error> {
-        /// Pick the child index to descend into for `block_index`.
-        ///
-        /// Mirrors the selection logic in `find_extent`: chooses the last key `<= block_index`.
-        fn child_index_for(
-            internal_nodes: &[ExtentInternalNode],
-            block_index: FileBlockIndex,
-        ) -> Option<usize> {
-            let mut next_node_index = None;
-            for (i, internal_node) in internal_nodes.iter().enumerate() {
-                if internal_node.block_within_file > block_index {
-                    break;
-                }
-                next_node_index = Some(i);
-            }
-            next_node_index
-        }
-
         fn leaf_prev_next(
             extents: &[Extent],
             block_index: FileBlockIndex,
@@ -647,7 +638,7 @@ impl ExtentTree {
                 }
                 ExtentNodeEntries::Internal(internal_nodes) => {
                     let next_node_index =
-                        match child_index_for(internal_nodes, block_index) {
+                        match find_child_index(internal_nodes, block_index) {
                             Some(i) => i,
                             None => {
                                 // Per `find_extent`, if there is no internal node key <= block, we
@@ -919,22 +910,6 @@ impl ExtentTree {
         &mut self,
         split_block_within_file: FileBlockIndex,
     ) -> Result<(), Ext4Error> {
-        /// Choose the child index to descend into for `block_index`.
-        /// Mirrors `find_extent` selection: last key `<= block_index`.
-        fn child_index_for(
-            internal_nodes: &[ExtentInternalNode],
-            block_index: FileBlockIndex,
-        ) -> Option<usize> {
-            let mut next_node_index = None;
-            for (i, internal_node) in internal_nodes.iter().enumerate() {
-                if internal_node.block_within_file > block_index {
-                    break;
-                }
-                next_node_index = Some(i);
-            }
-            next_node_index
-        }
-
         /// Split an extent within a leaf vector.
         /// Returns (did_split, leaf_first_extent_may_have_changed).
         fn split_in_leaf(
@@ -1037,7 +1012,7 @@ impl ExtentTree {
             match &node.entries {
                 ExtentNodeEntries::Leaf(_) => break,
                 ExtentNodeEntries::Internal(internal_nodes) => {
-                    let next_node_index = match child_index_for(
+                    let next_node_index = match find_child_index(
                         internal_nodes,
                         split_block_within_file,
                     ) {
