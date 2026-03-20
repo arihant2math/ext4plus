@@ -6,6 +6,7 @@
 - Add `Ext4::superblock` to get a reference to the superblock for more advanced use cases.
 - Add `Inode::fs_blocks` and `Inode::set_fs_blocks` for cleaner API that doesn't have to consider 512-byte vs full block sizes.
 - Disable writing when unsupported RO features are present to prevent corruption.
+- Honor `min_extra_isize` when creating inodes.
 - fsck fixes
     - Includes fixes that prevent data loss, generally allows better interop with other drivers due to checksum fixes
 

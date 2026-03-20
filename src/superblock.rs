@@ -34,6 +34,7 @@ pub struct Superblock {
     num_block_groups: u32,
     incompatible_features: IncompatibleFeatures,
     read_only_compatible_features: ReadOnlyCompatibleFeatures,
+    min_extra_isize: u16,
     checksum_seed: u32,
     htree_hash_seed: [u32; 4],
     journal_inode: Option<InodeIndex>,
@@ -56,6 +57,7 @@ impl PartialEq for Superblock {
             && self.incompatible_features == other.incompatible_features
             && self.read_only_compatible_features
                 == other.read_only_compatible_features
+            && self.min_extra_isize == other.min_extra_isize
             && self.checksum_seed == other.checksum_seed
             && self.htree_hash_seed == other.htree_hash_seed
             && self.journal_inode == other.journal_inode
@@ -103,6 +105,7 @@ impl Superblock {
         let s_desc_size = read_u16le(bytes, 0xfe);
         let s_blocks_count_hi = read_u32le(bytes, 0x150);
         let s_free_blocks_count_hi = read_u32le(bytes, 0x158);
+        let s_min_extra_isize = read_u16le(bytes, 0x15C);
         let s_checksum_seed = read_u32le(bytes, 0x270);
         const S_CHECKSUM_OFFSET: usize = 0x3fc;
         let s_checksum = read_u32le(bytes, S_CHECKSUM_OFFSET);
@@ -216,6 +219,7 @@ impl Superblock {
             num_block_groups,
             incompatible_features,
             read_only_compatible_features,
+            min_extra_isize: s_min_extra_isize,
             checksum_seed,
             htree_hash_seed: s_hash_seed,
             journal_inode,
@@ -305,6 +309,10 @@ impl Superblock {
         &self,
     ) -> ReadOnlyCompatibleFeatures {
         self.read_only_compatible_features
+    }
+
+    pub(crate) fn min_extra_isize(&self) -> u16 {
+        self.min_extra_isize
     }
 
     pub(crate) fn checksum_seed(&self) -> u32 {
@@ -452,6 +460,7 @@ mod tests {
                         | ReadOnlyCompatibleFeatures::LARGE_DIRECTORIES
                         | ReadOnlyCompatibleFeatures::LARGE_INODES
                         | ReadOnlyCompatibleFeatures::METADATA_CHECKSUMS,
+                min_extra_isize: 32,
                 checksum_seed: 0xfd3cc0be,
                 htree_hash_seed: [
                     0xbb071441, 0x7746982f, 0x6007bb8f, 0xb61a9b7
