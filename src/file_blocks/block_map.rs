@@ -3,6 +3,7 @@ use crate::util::{read_u32le, usize_from_u32};
 use crate::{Ext4, Ext4Error, Inode};
 
 use crate::error::CorruptKind;
+use crate::inode::InodeIndex;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::num::{NonZeroU32, NonZeroUsize};
@@ -475,6 +476,18 @@ impl BlockMap {
             return Err(Ext4Error::FileTooLarge);
         }
         Ok(())
+    }
+
+    #[maybe_async::maybe_async]
+    pub(crate) async fn allocate_block(
+        &mut self,
+        file_block_index: FileBlockIndex,
+        inode_index: InodeIndex,
+    ) -> Result<FsBlockIndex, Ext4Error> {
+        let new_block_index =
+            self.fs.alloc_block(NonZeroU32::new(1).unwrap()).await?;
+        self.set_block(file_block_index, new_block_index).await?;
+        Ok(new_block_index)
     }
 
     /// Clear a range of file blocks from the mapping and return the corresponding

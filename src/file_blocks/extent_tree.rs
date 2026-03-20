@@ -436,6 +436,39 @@ impl ExtentTree {
         }
     }
 
+    #[maybe_async::maybe_async]
+    pub(crate) async fn allocate_block(
+        &mut self,
+        block_index: FileBlockIndex,
+        inode_index: InodeIndex,
+    ) -> Result<FsBlockIndex, Ext4Error> {
+        if let Some(extent) = self.find_extent(block_index).await? {
+            let offset_within_extent =
+                block_index.checked_sub(extent.block_within_file).unwrap();
+            return Ok(extent
+                .start_block
+                .checked_add(FsBlockIndex::from(offset_within_extent))
+                .unwrap());
+        }
+
+        let new_block =
+            self.ext4.alloc_block(NonZeroU32::new(1).unwrap()).await?;
+
+        let extent = Extent {
+            block_within_file: block_index,
+            num_blocks: 1,
+            start_block: new_block,
+            is_initialized: true,
+        };
+
+        if let Err(e) = self.insert_extent(extent).await {
+            self.ext4.free_block(new_block).await?;
+            return Err(e);
+        }
+
+        Ok(new_block)
+    }
+
     /// Find the previous/next extents that border a block.
     ///
     /// Extents cover half-open ranges: `[start, start + num_blocks)`.
@@ -1167,7 +1200,7 @@ impl ExtentTree {
                         let mut modified = false;
 
                         // Try merge with next
-                        if idx + 1 < extents.len() {
+                        if idx.checked_add(1).unwrap() < extents.len() {
                             let curr = extents[idx];
                             let next = extents[idx + 1];
                             if Self::can_merge(&curr, &next) {
