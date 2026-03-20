@@ -326,7 +326,12 @@ impl Ext4 {
         offset_within_block: u32,
         dst: &mut [u8],
     ) -> Result<(), Ext4Error> {
-        let block_index = self.0.journal.read().await.map_block_index(original_block_index);
+        let block_index = self
+            .0
+            .journal
+            .read()
+            .await
+            .map_block_index(original_block_index);
 
         let err = || {
             Ext4Error::from(CorruptKind::BlockRead {
@@ -400,7 +405,12 @@ impl Ext4 {
         offset_within_block: u32,
         src: &[u8],
     ) -> Result<(), Ext4Error> {
-        let block_index = self.0.journal.read().await.map_block_index(original_block_index);
+        let block_index = self
+            .0
+            .journal
+            .read()
+            .await
+            .map_block_index(original_block_index);
 
         let err = || {
             Ext4Error::from(CorruptKind::BlockWrite {
