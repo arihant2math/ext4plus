@@ -72,9 +72,13 @@ impl Extent {
         start_block: FsBlockIndex,
         num_blocks: u16,
     ) -> Self {
-        // MSB of num_blocks is used to indicate whether the extent is initialized or not.
-        let is_initialized = (num_blocks & 0x8000) == 0;
-        let num_blocks = num_blocks & 0x7FFF;
+        // Per ext4 spec, ee_len <= 32768 is initialized, > 32768 is uninitialized.
+        let is_initialized = num_blocks <= 32768;
+        let num_blocks = if is_initialized {
+            num_blocks
+        } else {
+            num_blocks & 0x7FFF
+        };
         Self {
             block_within_file,
             start_block,
