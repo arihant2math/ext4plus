@@ -1202,13 +1202,13 @@ impl ExtentTree {
                         // Try merge with next
                         if idx.checked_add(1).unwrap() < extents.len() {
                             let curr = extents[idx];
-                            let next = extents[idx + 1];
+                            let next = extents[idx.checked_add(1).unwrap()];
                             if Self::can_merge(&curr, &next) {
                                 extents[idx].num_blocks = curr
                                     .num_blocks
                                     .checked_add(next.num_blocks)
                                     .unwrap();
-                                extents.remove(idx + 1);
+                                extents.remove(idx.checked_add(1).unwrap());
                                 modified = true;
                             }
                         }
@@ -1216,9 +1216,10 @@ impl ExtentTree {
                         // Try merge with prev
                         if idx > 0 {
                             let curr = extents[idx];
-                            let prev = extents[idx - 1];
+                            let prev = extents[idx.checked_sub(1).unwrap()];
                             if Self::can_merge(&prev, &curr) {
-                                extents[idx - 1].num_blocks = prev
+                                extents[idx.checked_sub(1).unwrap()]
+                                    .num_blocks = prev
                                     .num_blocks
                                     .checked_add(curr.num_blocks)
                                     .unwrap();
@@ -1292,7 +1293,10 @@ impl ExtentTree {
         }
 
         // Length limit (32768 blocks = 2^15)
-        if (u32::from(left.num_blocks) + u32::from(right.num_blocks)) > 32768 {
+        if (u32::from(left.num_blocks).checked_add(u32::from(right.num_blocks)))
+            .unwrap()
+            > 32768
+        {
             return false;
         }
 
