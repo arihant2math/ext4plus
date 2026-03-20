@@ -878,15 +878,13 @@ impl ExtentTree {
                 let inter_start = core::cmp::max(e_start, start);
                 let inter_end = core::cmp::min(e_end, end);
                 let inter_len = inter_end.checked_sub(inter_start).unwrap();
-                if inter_len > 0 {
-                    let phys_start = e
-                        .start_block
-                        .checked_add(FsBlockIndex::from(
-                            inter_start.checked_sub(e_start).unwrap(),
-                        ))
-                        .unwrap();
-                    freed.push((phys_start, inter_len));
-                }
+                let phys_start = e
+                    .start_block
+                    .checked_add(FsBlockIndex::from(
+                        inter_start.checked_sub(e_start).unwrap(),
+                    ))
+                    .unwrap();
+                freed.push((phys_start, inter_len));
 
                 // If the whole extent lies inside the removal range, drop it.
                 // With boundary splits, that should be the common case.
@@ -1151,8 +1149,121 @@ impl ExtentTree {
         &mut self,
         hint_block: FileBlockIndex,
     ) -> Result<(), Ext4Error> {
-        // TODO: implement
-        Ok(())
+        let mut node = self.node.clone();
+        loop {
+            match &mut node.entries {
+                ExtentNodeEntries::Leaf(extents) => {
+                    let idx = extents.iter().position(|e| {
+                        hint_block >= e.block_within_file
+                            && hint_block
+                                < e.block_within_file
+                                    .checked_add(FileBlockIndex::from(
+                                        e.num_blocks,
+                                    ))
+                                    .unwrap()
+                    });
+
+                    if let Some(idx) = idx {
+                        let mut modified = false;
+
+                        // Try merge with next
+                        if idx + 1 < extents.len() {
+                            let curr = extents[idx];
+                            let next = extents[idx + 1];
+                            if Self::can_merge(&curr, &next) {
+                                extents[idx].num_blocks = curr
+                                    .num_blocks
+                                    .checked_add(next.num_blocks)
+                                    .unwrap();
+                                extents.remove(idx + 1);
+                                modified = true;
+                            }
+                        }
+
+                        // Try merge with prev
+                        if idx > 0 {
+                            let curr = extents[idx];
+                            let prev = extents[idx - 1];
+                            if Self::can_merge(&prev, &curr) {
+                                extents[idx - 1].num_blocks = prev
+                                    .num_blocks
+                                    .checked_add(curr.num_blocks)
+                                    .unwrap();
+                                extents.remove(idx);
+                                modified = true;
+                            }
+                        }
+
+                        if modified {
+                            node.header.num_entries =
+                                u16::try_from(extents.len()).unwrap();
+                            if let Some(block) = node.block {
+                                let bytes = node.to_bytes(Some(
+                                    self.checksum_base.clone(),
+                                ))?;
+                                self.ext4
+                                    .write_to_block(block, 0, &bytes)
+                                    .await?;
+                            } else {
+                                self.node = node;
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+                ExtentNodeEntries::Internal(internal_nodes) => {
+                    let next_node_index =
+                        match find_child_index(internal_nodes, hint_block) {
+                            Some(i) => i,
+                            None => return Ok(()),
+                        };
+                    let next_node_block = internal_nodes[next_node_index].block;
+                    let next_node_data =
+                        self.ext4.read_block(next_node_block).await?;
+                    node = ExtentNode::from_bytes(
+                        Some(next_node_block),
+                        &next_node_data,
+                        self.inode,
+                        self.checksum_base.clone(),
+                        &self.ext4,
+                    )?;
+                }
+            }
+        }
+    }
+
+    fn can_merge(left: &Extent, right: &Extent) -> bool {
+        // Logical continuity
+        if left
+            .block_within_file
+            .checked_add(FileBlockIndex::from(left.num_blocks))
+            .unwrap()
+            != right.block_within_file
+        {
+            return false;
+        }
+
+        // Physical continuity
+        if left
+            .start_block
+            .checked_add(FsBlockIndex::from(left.num_blocks))
+            .unwrap()
+            != right.start_block
+        {
+            return false;
+        }
+
+        // State
+        if left.is_initialized != right.is_initialized {
+            return false;
+        }
+
+        // Length limit (32768 blocks = 2^15)
+        if (u32::from(left.num_blocks) + u32::from(right.num_blocks)) > 32768 {
+            return false;
+        }
+
+        true
     }
 }
 
@@ -1384,5 +1495,70 @@ mod tests {
         if err != CorruptKind::ExtentChecksum(tree.inode) {
             panic!("unexpected error: {err:?}");
         }
+    }
+
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn test_merge_adjacent() {
+        use crate::extent::Extent;
+
+        let fs = load_test_disk1_rw().await;
+        let ext4 = fs.0.clone();
+        let inode = root_inode_as_extent_tree(&fs).await;
+
+        let mut tree = ExtentTree::from_inode(&inode, ext4.clone()).unwrap();
+
+        // Start with an empty leaf (root)
+        tree.node.entries = ExtentNodeEntries::Leaf(vec![
+            Extent {
+                block_within_file: 0,
+                start_block: 100,
+                num_blocks: 5,
+                is_initialized: true,
+            },
+            Extent {
+                block_within_file: 5,
+                start_block: 105,
+                num_blocks: 5,
+                is_initialized: true,
+            },
+        ]);
+        tree.node.header.num_entries = 2;
+
+        // Merge logical [0,5) and [5,10) -> [0,10)
+        tree.try_merge_adjacent(0).await.unwrap();
+
+        let ExtentNodeEntries::Leaf(extents) = &tree.node.entries else {
+            panic!("expected leaf");
+        };
+        assert_eq!(extents.len(), 1);
+        assert_eq!(extents[0].block_within_file, 0);
+        assert_eq!(extents[0].num_blocks, 10);
+        assert_eq!(extents[0].start_block, 100);
+
+        // Try merge unmergeable (physically non-contiguous)
+        tree.node.entries = ExtentNodeEntries::Leaf(vec![
+            Extent {
+                block_within_file: 0,
+                start_block: 100,
+                num_blocks: 5,
+                is_initialized: true,
+            },
+            Extent {
+                block_within_file: 5,
+                start_block: 200, // Gap
+                num_blocks: 5,
+                is_initialized: true,
+            },
+        ]);
+        tree.node.header.num_entries = 2;
+
+        tree.try_merge_adjacent(0).await.unwrap();
+        let ExtentNodeEntries::Leaf(extents) = &tree.node.entries else {
+            panic!("expected leaf");
+        };
+        assert_eq!(extents.len(), 2);
     }
 }
