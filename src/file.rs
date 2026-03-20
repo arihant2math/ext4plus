@@ -774,54 +774,26 @@ async fn write_at_extent(
                 );
 
                 // Try to allocate needed_blocks. If allocation fails for full amount, try smaller (but >0).
-                let mut tried_blocks = needed_blocks;
-                let start_fs_block = loop {
-                    match ext4
-                        .alloc_contiguous_blocks(
-                            inode.index,
-                            NonZeroU32::new(
-                                u32::try_from(tried_blocks).unwrap(),
-                            )
-                            .unwrap(),
-                        )
-                        .await
-                    {
-                        Ok(start_fs) => break start_fs,
-                        Err(_) => {
-                            if tried_blocks == 0 {
-                                return Ok(total_written);
-                            }
-                            #[expect(
-                                clippy::arithmetic_side_effects,
-                                reason = "We check for tried_blocks == 0 above"
-                            )]
-                            {
-                                tried_blocks /= tried_blocks; // or tried_blocks - 1
-                            }
-                            if tried_blocks == 0 {
-                                return Ok(total_written);
-                            }
-                        }
-                    }
-                };
+                #[expect(clippy::as_conversions)]
+                // Intentional truncation to u16 max
+                let to_try = needed_blocks as u16; // TODO: Ensure that this is u15 max
                 // Insert extent: file-blocks [current_block, current_block + tried_blocks) -> FS blocks [start_fs_block, ...]
-                let new_extent = Extent::new(
-                    current_block,
-                    start_fs_block,
-                    u16::try_from(tried_blocks).unwrap(),
-                );
+                let new_extent =
+                    Extent::allocate(inode.index, current_block, to_try, ext4)
+                        .await?;
+                let tried_blocks = new_extent.num_blocks;
                 extent_tree.insert_extent(new_extent).await?;
                 inode.set_fs_blocks(
                     inode
                         .fs_blocks(ext4)?
-                        .checked_add(u64_from_usize(tried_blocks))
+                        .checked_add(u64::from(tried_blocks))
                         .unwrap(),
                     ext4,
                 )?;
                 // Write data into the newly allocated blocks (same logic as initialized extents except we don't need to read old content)
                 // If first or last block is partial, zero the unwritten parts.
                 let want_bytes = bytes_for_blocks(
-                    tried_blocks,
+                    usize::from(tried_blocks),
                     start_offset_in_block,
                     block_size.to_usize(),
                 );
