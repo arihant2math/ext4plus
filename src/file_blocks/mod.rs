@@ -3,6 +3,7 @@
 use crate::{Ext4, Ext4Error, Inode, InodeFlags};
 
 use crate::block_index::{FileBlockIndex, FsBlockIndex};
+use crate::inode::InodeIndex;
 
 pub(crate) mod block_map;
 pub(crate) mod extent_tree;
@@ -56,6 +57,22 @@ impl FileBlocks {
                 extent_tree.get_block(block_index).await
             }
             Self::BlockMap(block_map) => block_map.get_block(block_index).await,
+        }
+    }
+
+    #[maybe_async::maybe_async]
+    pub(crate) async fn allocate_block(
+        &mut self,
+        block_index: FileBlockIndex,
+        inode_index: InodeIndex,
+    ) -> Result<FsBlockIndex, Ext4Error> {
+        match self {
+            Self::ExtentTree(extent_tree) => {
+                extent_tree.allocate_block(block_index, inode_index).await
+            }
+            Self::BlockMap(block_map) => {
+                block_map.allocate_block(block_index, inode_index).await
+            }
         }
     }
 }
