@@ -104,6 +104,7 @@
 #![allow(clippy::while_let_on_iterator)]
 
 extern crate alloc;
+extern crate core;
 
 mod bitmap;
 mod block_group;
@@ -549,8 +550,13 @@ impl Ext4 {
 
             if free_inodes > 0 {
                 let inode_bitmap_handle = self.get_inode_bitmap_handle(bg_id);
-                let Some(inode_num) =
-                    inode_bitmap_handle.find_first(false, self).await?
+                let Some(inode_num) = inode_bitmap_handle
+                    .find_first(
+                        false,
+                        ..self.0.superblock.inodes_per_block_group().get(),
+                        self,
+                    )
+                    .await?
                 else {
                     continue;
                 };
@@ -720,7 +726,7 @@ impl Ext4 {
             if free_blocks > 0 {
                 let block_bitmap_handle = self.get_block_bitmap_handle(bg_id);
                 let Some(block_num) =
-                    block_bitmap_handle.find_first(false, self).await?
+                    block_bitmap_handle.find_first(false, .., self).await?
                 else {
                     continue;
                 };
@@ -786,7 +792,7 @@ impl Ext4 {
             if free_blocks >= num_blocks.get() {
                 let block_bitmap_handle = self.get_block_bitmap_handle(bg_id);
                 let Some(block_num) = block_bitmap_handle
-                    .find_first_n(num_blocks.into(), false, self)
+                    .find_first_n(num_blocks.into(), false, .., self)
                     .await?
                 else {
                     continue;

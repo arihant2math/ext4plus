@@ -3,6 +3,7 @@ use crate::checksum::Checksum;
 use crate::{Ext4, Ext4Error};
 
 use alloc::vec;
+use core::ops::RangeBounds;
 
 pub(crate) struct BitmapHandle {
     block: FsBlockIndex,
@@ -58,6 +59,7 @@ impl BitmapHandle {
     pub(crate) async fn find_first(
         &self,
         value: bool,
+        range: impl RangeBounds<u32>,
         ext4: &Ext4,
     ) -> Result<Option<u32>, Ext4Error> {
         let mut dst = [0; 1];
@@ -84,13 +86,15 @@ impl BitmapHandle {
                 if dst[0] != 0xFF {
                     for bit_index in 0..8 {
                         if (dst[0] & (1 << bit_index)) == 0 {
-                            return Ok(Some(
-                                byte_index
-                                    .checked_mul(8)
-                                    .unwrap()
-                                    .checked_add(bit_index)
-                                    .unwrap(),
-                            ));
+                            let index = byte_index
+                                .checked_mul(8)
+                                .unwrap()
+                                .checked_add(bit_index)
+                                .unwrap();
+                            if !range.contains(&(index)) {
+                                continue;
+                            }
+                            return Ok(Some(index));
                         }
                     }
                 }
@@ -106,6 +110,7 @@ impl BitmapHandle {
         &self,
         n: u32,
         value: bool,
+        range: impl RangeBounds<u32>,
         ext4: &Ext4,
     ) -> Result<Option<u32>, Ext4Error> {
         let mut dst = [0; 1];
@@ -115,14 +120,19 @@ impl BitmapHandle {
                 .await?;
             for bit_index in 0..8 {
                 if ((dst[0] & (1 << bit_index)) != 0) == value {
+                    let index = byte_index
+                        .checked_mul(8)
+                        .unwrap()
+                        .checked_add(bit_index)
+                        .unwrap();
+                    if !range.contains(&(index)) {
+                        count = 0;
+                        continue;
+                    }
                     count = count.checked_add(1).unwrap();
                     if count == n {
                         return Ok(Some(
-                            byte_index
-                                .checked_mul(8)
-                                .unwrap()
-                                .checked_add(bit_index)
-                                .unwrap()
+                            index
                                 .checked_add(1)
                                 .unwrap()
                                 .checked_sub(n)
@@ -163,11 +173,11 @@ mod tests {
         let fs = crate::test_util::load_test_disk1().await;
 
         let bitmap = fs.get_block_bitmap_handle(0);
-        let first = bitmap.find_first(false, &fs).await.unwrap();
+        let first = bitmap.find_first(false, .., &fs).await.unwrap();
         // Ensure false
         let query = bitmap.query(first.unwrap(), &fs).await.unwrap();
         assert!(!query);
-        let first = bitmap.find_first(true, &fs).await.unwrap();
+        let first = bitmap.find_first(true, .., &fs).await.unwrap();
         // Ensure true
         let query = bitmap.query(first.unwrap(), &fs).await;
         assert!(query.unwrap());
