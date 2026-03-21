@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Dependency bump
+- More fsck fixes
+    - Include fix for bg group bitmap checksum calculation
+    - Also fixes superblock not being written back properly
+
 ## 0.1.0-alpha.7
 
 - BREAKING: Hide `Inode::set_blocks`
