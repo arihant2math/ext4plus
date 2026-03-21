@@ -171,6 +171,7 @@ impl<I: AsyncIterator> AsyncIterator for AsyncSkip<I> {
     async fn next(&mut self) -> Option<Self::Item> {
         while self.n > 0 {
             match self.iter.next().await {
+                // OK to unwrap: we know n > 0, so there must be at least one more item to skip.
                 Some(_) => self.n = self.n.checked_sub(1).unwrap(),
                 None => return None,
             }
