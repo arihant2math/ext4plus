@@ -239,12 +239,6 @@ impl Superblock {
     }
 
     fn to_bytes(&self) -> [u8; Self::SIZE_IN_BYTES_ON_DISK] {
-        if !self
-            .read_only_compatible_features
-            .contains(ReadOnlyCompatibleFeatures::METADATA_CHECKSUMS)
-        {
-            return self.data;
-        }
         let mut data = self.data;
         // Update necessary fields in `data` that may have changed since superblock creation
         write_u32le(
@@ -257,10 +251,15 @@ impl Superblock {
         write_u32le(&mut data, 0xC, free_blocks_lo);
         write_u32le(&mut data, 0x158, free_blocks_hi);
 
-        let mut checksum = Checksum::new();
-        checksum.update(&data[..0x3fc]);
-        let checksum_bytes = checksum.finalize().to_le_bytes();
-        data[0x3fc..].copy_from_slice(&checksum_bytes);
+        if self
+            .read_only_compatible_features
+            .contains(ReadOnlyCompatibleFeatures::METADATA_CHECKSUMS)
+        {
+            let mut checksum = Checksum::new();
+            checksum.update(&data[..0x3fc]);
+            let checksum_bytes = checksum.finalize().to_le_bytes();
+            data[0x3fc..].copy_from_slice(&checksum_bytes);
+        }
         data
     }
 
