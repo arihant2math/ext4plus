@@ -210,7 +210,11 @@ pub(crate) async fn load_test_disk1_rw_no_fsck() -> Ext4 {
 /// `e2fsprogs/e2fsprogs` image.
 #[allow(dead_code)]
 pub(crate) fn fsck_ext4_arc_image(image: &Arc<Mutex<Vec<u8>>>) {
-    if std::env::var_os("EXT4PLUS_RUN_FSCK").is_none() {
+    if let Some(s) = std::env::var_os("EXT4PLUS_RUN_FSCK")
+        && s == "0"
+    {
+        return;
+    } else if std::env::var_os("EXT4PLUS_RUN_FSCK").is_none() {
         return;
     }
 
