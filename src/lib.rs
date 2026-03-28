@@ -474,7 +474,7 @@ impl Ext4 {
         block_group_index: BlockGroupIndex,
     ) -> BitmapHandle {
         let block_group = self.get_block_group_descriptor(block_group_index);
-        BitmapHandle::new(block_group.block_bitmap_block())
+        BitmapHandle::new(block_group.block_bitmap_block(), false)
     }
 
     fn get_inode_bitmap_handle(
@@ -482,7 +482,7 @@ impl Ext4 {
         block_group_index: BlockGroupIndex,
     ) -> BitmapHandle {
         let block_group = self.get_block_group_descriptor(block_group_index);
-        BitmapHandle::new(block_group.inode_bitmap_block())
+        BitmapHandle::new(block_group.inode_bitmap_block(), true)
     }
 
     #[maybe_async::maybe_async]
@@ -669,10 +669,15 @@ impl Ext4 {
         &self,
         block_index: FsBlockIndex,
     ) -> Result<(BlockGroupIndex, u32), Ext4Error> {
-        let block_group_index = block_index
-            / NonZeroU64::from(self.0.superblock.blocks_per_group());
-        let block_offset = block_index
-            % NonZeroU64::from(self.0.superblock.blocks_per_group());
+        let blocks_per_group =
+            NonZeroU64::from(self.0.superblock.blocks_per_group());
+        let relative_block_index = block_index
+            .checked_sub(u64::from(self.0.superblock.first_data_block()))
+            .ok_or(CorruptKind::FirstDataBlock(
+                self.0.superblock.first_data_block(),
+            ))?;
+        let block_group_index = relative_block_index / blocks_per_group;
+        let block_offset = relative_block_index % blocks_per_group;
         Ok((
             // TODO: Wrong error?
             BlockGroupIndex::try_from(block_group_index)

@@ -246,6 +246,16 @@ async fn test_new_file_grow() {
             .unwrap();
         let index = new_inode.index;
         let mut file = File::open_inode(&fs, new_inode).unwrap();
+        // Add to dir
+        let root_inode = fs.read_root_inode().await.unwrap();
+        let root_dir = Dir::open_inode(&fs.0, root_inode).unwrap();
+        root_dir
+            .link(
+                DirEntryName::try_from(b"new_file").unwrap(),
+                &mut file.inode_mut(),
+            )
+            .await
+            .unwrap();
         let data = b"Hello, world! This file will grow as we write to it.";
         let n = file.write_bytes(data).await.unwrap();
         assert_eq!(n, data.len());
@@ -281,6 +291,13 @@ async fn test_new_file_grow2() {
             .await
             .unwrap();
         let index = new_inode.index;
+        // Add to dir
+        let root_inode = fs.read_root_inode().await.unwrap();
+        let root_dir = Dir::open_inode(&fs.0, root_inode).unwrap();
+        root_dir
+            .link(DirEntryName::try_from(b"new_file").unwrap(), &mut new_inode)
+            .await
+            .unwrap();
         let data = b"Hello, world! This file will grow as we write to it.";
         let _ = write_at(&fs, &mut new_inode, data, 0).await.unwrap();
         let data = b"Hello, world! This file will grow as we write to it.";
