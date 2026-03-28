@@ -511,7 +511,8 @@ impl BlockMap {
             if block != 0 {
                 removed_blocks.push(block);
             }
-            self.set_block(FileBlockIndex::try_from(i).unwrap(), 0);
+            self.set_block(FileBlockIndex::try_from(i).unwrap(), 0)
+                .await?;
         }
         Ok(removed_blocks)
     }
