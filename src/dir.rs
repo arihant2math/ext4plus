@@ -66,7 +66,7 @@ pub(crate) async fn get_dir_entry_inode_by_name(
 #[maybe_async::maybe_async]
 pub(crate) async fn add_dir_entry_non_htree(
     fs: &Ext4,
-    dir_inode: &Inode,
+    dir_inode: &mut Inode,
     name: DirEntryName<'_>,
     inode: InodeIndex,
     file_type: FileType,
@@ -192,8 +192,59 @@ pub(crate) async fn add_dir_entry_non_htree(
         is_first = false;
     }
 
-    // Would require appending a new block to the directory file.
-    Err(Ext4Error::Readonly)
+    let mut new_block_buf = vec![0u8; block_size];
+
+    let tail_size = if fs.has_metadata_checksums() {
+        12usize
+    } else {
+        0usize
+    };
+    let usable = block_size.checked_sub(tail_size).ok_or_else(|| {
+        Ext4Error::from(CorruptKind::DirEntry(dir_inode.index))
+    })?;
+
+    if need > usable {
+        return Err(CorruptKind::DirEntry(dir_inode.index).into());
+    }
+
+    // New entry.
+    write_dir_entry_bytes(
+        &mut new_block_buf,
+        0,
+        usable,
+        inode,
+        name,
+        file_type,
+    )?;
+
+    if fs.has_metadata_checksums() {
+        let checksum_start = block_size.checked_sub(12).unwrap();
+        write_u32le(&mut new_block_buf, checksum_start, 0);
+        let tail_val = 12u32 | (0xDE << 24);
+        write_u32le(
+            &mut new_block_buf,
+            checksum_start.checked_add(4).unwrap(),
+            tail_val,
+        );
+        DirBlock {
+            fs,
+            block_index: 0,
+            is_first: false,
+            dir_inode: dir_inode.index,
+            has_htree: false,
+            checksum_base: dir_inode.checksum_base().clone(),
+        }
+        .update_checksum(&mut new_block_buf)?;
+    }
+
+    let n = write_at(fs, dir_inode, &new_block_buf, dir_inode.size_in_bytes()).await?;
+    if n != new_block_buf.len() {
+        return Err(Ext4Error::NoSpace);
+    }
+
+    dir_inode.write(fs).await?;
+
+    Ok(())
 }
 
 /// Remove an item from a directory without an htree.
@@ -527,7 +578,7 @@ impl Dir {
     /// * The current directory is a htree
     #[maybe_async::maybe_async]
     pub async fn link(
-        &self,
+        &mut self,
         name: DirEntryName<'_>,
         target_inode: &mut Inode,
     ) -> Result<(), Ext4Error> {
@@ -537,18 +588,16 @@ impl Dir {
         target_inode.write(&self.fs).await?;
 
         if target_inode.file_type() == FileType::Directory {
-            let mut parent_inode =
-                Inode::read(&self.fs, self.inode.index).await?;
-            let parent_old = parent_inode.links_count();
+            let parent_old = self.inode.links_count();
             let parent_new =
                 parent_old.checked_add(1).ok_or(Ext4Error::Readonly)?;
-            parent_inode.set_links_count(parent_new);
-            parent_inode.write(&self.fs).await?;
+            self.inode.set_links_count(parent_new);
+            self.inode.write(&self.fs).await?;
         }
 
         add_dir_entry_non_htree(
             &self.fs,
-            &self.inode,
+            &mut self.inode,
             name,
             target_inode.index,
             target_inode.file_type(),

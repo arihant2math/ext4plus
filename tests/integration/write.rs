@@ -171,7 +171,7 @@ async fn test_inode_creation() {
         assert_eq!(new_inode.metadata().uid, 0);
         assert_eq!(new_inode.metadata().gid, 0);
         let root_inode = fs.read_root_inode().await.unwrap();
-        let root_dir = Dir::open_inode(&fs.0, root_inode).unwrap();
+        let mut root_dir = Dir::open_inode(&fs.0, root_inode).unwrap();
         // Link the new inode into the root directory.
         root_dir
             .link(DirEntryName::try_from(b"new_file").unwrap(), &mut new_inode)
@@ -251,7 +251,7 @@ async fn test_new_file_grow() {
         let mut file = File::open_inode(&fs, new_inode).unwrap();
         // Add to dir
         let root_inode = fs.read_root_inode().await.unwrap();
-        let root_dir = Dir::open_inode(&fs.0, root_inode).unwrap();
+        let mut root_dir = Dir::open_inode(&fs.0, root_inode).unwrap();
         root_dir
             .link(
                 DirEntryName::try_from(b"new_file").unwrap(),
@@ -296,7 +296,7 @@ async fn test_new_file_grow2() {
         let index = new_inode.index;
         // Add to dir
         let root_inode = fs.read_root_inode().await.unwrap();
-        let root_dir = Dir::open_inode(&fs.0, root_inode).unwrap();
+        let mut root_dir = Dir::open_inode(&fs.0, root_inode).unwrap();
         root_dir
             .link(DirEntryName::try_from(b"new_file").unwrap(), &mut new_inode)
             .await
@@ -460,7 +460,7 @@ async fn test_massive_write() {
 async fn test_init_directory_creates_dot_and_dotdot() {
     let fses = [load_test_disk1_rw().await];
     for fs in fses {
-        let root_dir =
+        let mut root_dir =
             Dir::open_inode(&fs.0, fs.read_root_inode().await.unwrap())
                 .unwrap();
 
@@ -619,9 +619,9 @@ async fn test_create_symlink() {
     let fses = [load_test_disk1_rw().await, load_ext2_rw().await];
     for fs in fses {
         let root_inode = fs.read_root_inode().await.unwrap();
-        let root_dir = Dir::open_inode(&fs.0, root_inode).unwrap();
+        let mut root_dir = Dir::open_inode(&fs.0, root_inode).unwrap();
         fs.symlink(
-            &root_dir,
+            &mut root_dir,
             DirEntryName::try_from(b"link_to_small").unwrap(),
             PathBuf::try_from("/small_file").unwrap(),
             0,
@@ -643,5 +643,49 @@ async fn test_create_symlink() {
         let n = file.read_bytes(&mut buf).await.unwrap();
         assert_eq!(n, 13);
         assert_eq!(&buf, b"hello, world!");
+    }
+}
+
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
+async fn test_many_dir_entries() {
+    let fses = [load_test_disk1_rw().await, load_ext2_rw().await];
+    for fs in fses {
+        let root_inode = fs.read_root_inode().await.unwrap();
+        let mut root_dir = Dir::open_inode(&fs.0, root_inode).unwrap();
+        for i in 0..100 {
+            let name = format!("file_{:03}", i);
+            let mut new_inode = fs
+                .create_inode(InodeCreationOptions {
+                    file_type: FileType::Regular,
+                    mode: InodeMode::S_IRUSR
+                        | InodeMode::S_IWUSR
+                        | InodeMode::S_IFREG,
+                    uid: 0,
+                    gid: 0,
+                    time: Default::default(),
+                    flags: InodeFlags::empty(),
+                })
+                .await
+                .unwrap();
+            root_dir
+                .link(
+                    DirEntryName::try_from(name.as_bytes()).unwrap(),
+                    &mut new_inode,
+                )
+                .await
+                .unwrap();
+        }
+        // Verify all entries are visible.
+        for i in 0..100 {
+            let name = format!("file_{:03}", i);
+            let inode = fs
+                .path_to_inode(Path::new(("/".to_string() + &name).as_bytes()), FollowSymlinks::All)
+                .await
+                .unwrap();
+            assert_eq!(inode.metadata().file_type, FileType::Regular);
+        }
     }
 }

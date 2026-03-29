@@ -1022,7 +1022,7 @@ impl Ext4 {
     #[maybe_async::maybe_async]
     pub async fn symlink(
         &self,
-        parent_dir: &Dir,
+        parent_dir: &mut Dir,
         name: DirEntryName<'_>,
         target: PathBuf,
         uid: u32,
