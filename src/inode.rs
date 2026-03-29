@@ -690,6 +690,7 @@ impl Inode {
     }
 
     /// Get the inode's delete time directly from a raw value, without converting to/from `Duration`.
+    #[must_use]
     pub fn dtime_val(&self) -> u32 {
         read_u32le(&self.inode_data, 0x14)
     }

@@ -267,9 +267,9 @@ pub(crate) async fn remove_dir_entry_non_htree(
         return remove_dir_entry_htree(fs, dir_inode, name).await;
     }
 
-    let block_size = fs.0.superblock.block_size().to_usize();
+    let block_size = fs.0.superblock.block_size();
     let mut file_blocks = FileBlocks::new(fs.clone(), dir_inode)?;
-    let mut block_buf = vec![0u8; block_size];
+    let mut block_buf = vec![0u8; block_size.to_usize()];
 
     let mut is_first = true;
     let mut logical_block_index = 0u64;
@@ -281,7 +281,7 @@ pub(crate) async fn remove_dir_entry_non_htree(
         let mut off = 0usize;
         let mut prev_off: Option<usize> = None;
 
-        while off < block_size {
+        while off < block_size.to_usize() {
             let inode_field = read_u32le(&block_buf, off);
             let rec_len = read_u16le(&block_buf, off.checked_add(4).unwrap());
             let rec_len_usize = usize::from(rec_len);
@@ -353,19 +353,26 @@ pub(crate) async fn remove_dir_entry_non_htree(
                             verify_off.checked_add(rec_len_usize).unwrap();
                     }
 
-                    let file_blocks_count =
-                        (dir_inode.size_in_bytes() + block_size as u64 - 1)
-                            / block_size as u64;
+                    let file_blocks_count = (dir_inode
+                        .size_in_bytes()
+                        .checked_add(block_size.to_u64())
+                        .unwrap()
+                        .checked_sub(1)
+                        .unwrap())
+                        / block_size.to_nz_u64();
 
                     if all_empty
-                        && logical_block_index == file_blocks_count - 1
+                        && logical_block_index
+                            == file_blocks_count.checked_sub(1).unwrap()
                         && logical_block_index > 0
                     {
                         // Truncate the file to remove the last empty block.
                         truncate(
                             fs,
                             dir_inode,
-                            logical_block_index * block_size as u64,
+                            logical_block_index
+                                .checked_mul(block_size.to_u64())
+                                .unwrap(),
                         )
                         .await?;
                         return Ok(());
@@ -392,7 +399,7 @@ pub(crate) async fn remove_dir_entry_non_htree(
         }
 
         is_first = false;
-        logical_block_index += 1;
+        logical_block_index = logical_block_index.checked_add(1).unwrap();
     }
 
     Err(Ext4Error::NotFound)
