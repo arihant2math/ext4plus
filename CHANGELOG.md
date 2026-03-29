@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- BREAKING: Require mutable dir for `Ext4::symlink` and mutable self for `Dir::link`.
+- BREAKING: Require mutable dir for `Ext4::symlink` and mutable self for `Dir::link` and `Dir::unlink`.
 - Add `Inode::dtime_val` and `Inode::set_dtime_val` for handling of deleted inodes.
 - Fix writing to directories not supporting internally allocating blocks
 - Dependency bump
