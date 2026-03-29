@@ -748,3 +748,78 @@ async fn test_htree_write() {
     .await
     .unwrap();
 }
+
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
+#[ignore = "Fix"]
+async fn test_htree_many_dir_entries() {
+    let fs = load_test_disk1_rw().await;
+    let big_dir = fs
+        .path_to_inode(Path::new("/big_dir".as_bytes()), FollowSymlinks::All)
+        .await
+        .unwrap();
+    let mut dir = Dir::open_inode(&fs.0, big_dir).unwrap();
+    for i in 0..1000 {
+        let name = format!("file_{:04}", i);
+        let mut new_inode = fs
+            .create_inode(InodeCreationOptions {
+                file_type: FileType::Regular,
+                mode: InodeMode::S_IRUSR
+                    | InodeMode::S_IWUSR
+                    | InodeMode::S_IFREG,
+                uid: 0,
+                gid: 0,
+                time: Default::default(),
+                flags: InodeFlags::empty(),
+            })
+            .await
+            .unwrap();
+        dir.link(
+            DirEntryName::try_from(name.as_bytes()).unwrap(),
+            &mut new_inode,
+        )
+        .await
+        .unwrap();
+    }
+    for i in 0..1000 {
+        let name = format!("file_{:04}", i);
+        let inode = fs
+            .path_to_inode(
+                Path::new(("/big_dir/".to_string() + &name).as_bytes()),
+                FollowSymlinks::All,
+            )
+            .await
+            .unwrap();
+        assert_eq!(inode.metadata().file_type, FileType::Regular);
+    }
+
+    for i in 0..1000 {
+        let name = format!("file_{:04}", i);
+        let inode = fs
+            .path_to_inode(
+                Path::new(&("/big_dir/".to_string() + &name)),
+                FollowSymlinks::All,
+            )
+            .await
+            .unwrap();
+        dir.unlink(DirEntryName::try_from(name.as_bytes()).unwrap(), inode)
+            .await
+            .unwrap();
+    }
+
+    for i in 0..1000 {
+        let name = format!("file_{:04}", i);
+        let err = fs
+            .path_to_inode(
+                Path::new(&("/big_dir/".to_string() + &name)),
+                FollowSymlinks::All,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Ext4Error::NotFound));
+    }
+}
+
+
