@@ -56,12 +56,11 @@ read-only:
 
 Near-term goals (pre-0.1.0):
 
-- htree directory write support
 - stability/more testing
 
 Goals that are also being worked on, but are not necessarily pre-0.1.0:
 
-- extended attribute support
+- extended attribute support (maybe pre-0.1.0)
 - inline data support
 - journaling write support
 - gdt checksum support
