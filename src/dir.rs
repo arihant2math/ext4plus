@@ -138,28 +138,18 @@ pub(crate) async fn add_dir_entry_non_htree(
                     continue;
                 }
 
-                if inode_field != 0 {
-                    write_u16le(
-                        &mut block_buf,
-                        off.checked_add(4).unwrap(),
-                        u16::try_from(new_rec_len_for_curr).map_err(|_| {
-                            Ext4Error::from(CorruptKind::DirEntry(
-                                dir_inode.index,
-                            ))
-                        })?,
-                    );
+                let rec_len = if inode_field != 0 {
+                    new_rec_len_for_curr
                 } else {
-                    // Make sure an unused entry becomes a valid single free record by giving it its full size.
-                    write_u16le(
-                        &mut block_buf,
-                        off.checked_add(4).unwrap(),
-                        u16::try_from(rec_len_usize).map_err(|_| {
-                            Ext4Error::from(CorruptKind::DirEntry(
-                                dir_inode.index,
-                            ))
-                        })?,
-                    );
-                }
+                    rec_len_usize
+                };
+                write_u16le(
+                    &mut block_buf,
+                    off.checked_add(4).unwrap(),
+                    u16::try_from(rec_len).map_err(|_| {
+                        Ext4Error::from(CorruptKind::DirEntry(dir_inode.index))
+                    })?,
+                );
 
                 // Write the new entry.
                 write_dir_entry_bytes(
