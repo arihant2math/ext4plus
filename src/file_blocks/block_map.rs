@@ -52,7 +52,9 @@ impl<T: BlockMapEntry> IndirectBlock<T> {
     #[maybe_async::maybe_async]
     async fn get(&self, index: usize, fs: &Ext4) -> Result<T, Ext4Error> {
         let block_data = fs.read_block(u64::from(self.block_index.0)).await?;
-        let entry_index = index.checked_mul(4).unwrap();
+        let entry_index = index
+            .checked_mul(4)
+            .ok_or(CorruptKind::BlockMap(self.block_index.value()))?;
         if entry_index >= block_data.len() {
             return Err(CorruptKind::BlockMap(self.block_index.value()))?;
         }
@@ -69,11 +71,16 @@ impl<T: BlockMapEntry> IndirectBlock<T> {
     ) -> Result<(), Ext4Error> {
         let mut block_data =
             fs.read_block(u64::from(self.block_index.0)).await?;
-        let entry_index = index.checked_mul(4).unwrap();
+        let entry_index = index
+            .checked_mul(4)
+            .ok_or(CorruptKind::BlockMap(self.block_index.value()))?;
         if entry_index >= block_data.len() {
             return Err(CorruptKind::BlockMap(self.block_index.value()))?;
         }
-        block_data[entry_index..entry_index.checked_add(4).unwrap()]
+        block_data[entry_index
+            ..entry_index
+                .checked_add(4)
+                .ok_or(CorruptKind::BlockMap(self.block_index.value()))?]
             .copy_from_slice(&block_index.value().to_le_bytes());
         fs.write_to_block(u64::from(self.block_index.0), 0, &block_data)
             .await?;
