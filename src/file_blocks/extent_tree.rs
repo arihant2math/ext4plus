@@ -50,7 +50,7 @@ const EXTENT_MAGIC: u16 = 0xf30a;
 ///
 /// Each node starts with a `NodeHeader` that includes the node's depth
 /// (depth 0 is a leaf node) and the number of entries in the node.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 struct NodeHeader {
     /// Number of entries in this node, not including the header.
     num_entries: u16,
@@ -136,7 +136,7 @@ impl NodeHeader {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 struct ExtentInternalNode {
     /// Offset of the block within the file.
     pub(crate) block_within_file: FileBlockIndex,
@@ -178,7 +178,7 @@ impl ExtentInternalNode {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum ExtentNodeEntries {
     Internal(Vec<ExtentInternalNode>),
     Leaf(Vec<Extent>),
@@ -221,7 +221,7 @@ impl ExtentNodeEntries {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct ExtentNode {
     block: Option<FsBlockIndex>,
     header: NodeHeader,
@@ -313,6 +313,7 @@ impl ExtentNode {
 }
 
 /// Iterator of an inode's extent tree.
+#[derive(Debug)]
 pub(crate) struct ExtentTree {
     ext4: Ext4,
     inode: InodeIndex,

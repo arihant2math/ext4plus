@@ -8,6 +8,7 @@ use crate::inode::InodeIndex;
 pub(crate) mod block_map;
 pub(crate) mod extent_tree;
 
+#[derive(Debug)]
 pub(crate) enum FileBlocks {
     BlockMap(block_map::BlockMap),
     ExtentTree(extent_tree::ExtentTree),

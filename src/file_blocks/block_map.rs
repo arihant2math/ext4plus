@@ -29,7 +29,7 @@ impl BlockMapEntry for BlockIndex {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 struct IndirectBlock<T: BlockMapEntry> {
     block_index: BlockIndex,
     phantom_data: PhantomData<T>,
@@ -88,6 +88,7 @@ impl<T: BlockMapEntry> IndirectBlock<T> {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct BlockMap {
     fs: Ext4,
     direct_blocks: [u32; DIRECT_BLOCKS],

@@ -245,7 +245,7 @@ impl Ext4 {
             superblock,
             // Initialize with an empty journal, because loading the
             // journal requires a valid `Ext4` object.
-            journal: Journal::empty(),
+            journal: Journal::mem(),
         }));
 
         // Load the actual journal, if present.
@@ -328,7 +328,8 @@ impl Ext4 {
         offset_within_block: u32,
         dst: &mut [u8],
     ) -> Result<(), Ext4Error> {
-        let block_index = self.0.journal.map_block_index(original_block_index);
+        let block_index =
+            self.0.journal.map_block_index(original_block_index).await;
 
         let err = || {
             Ext4Error::from(CorruptKind::BlockRead {
@@ -402,7 +403,8 @@ impl Ext4 {
         offset_within_block: u32,
         src: &[u8],
     ) -> Result<(), Ext4Error> {
-        let block_index = self.0.journal.map_block_index(original_block_index);
+        let block_index =
+            self.0.journal.map_block_index(original_block_index).await;
 
         let err = || {
             Ext4Error::from(CorruptKind::BlockWrite {
