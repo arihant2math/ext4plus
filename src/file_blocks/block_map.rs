@@ -88,6 +88,23 @@ impl<T: BlockMapEntry> IndirectBlock<T> {
     }
 }
 
+#[maybe_async::maybe_async]
+async fn ensure_allocated<T: BlockMapEntry>(
+    block: &mut IndirectBlock<T>,
+    allocated: &mut u32,
+    fs: &Ext4,
+) -> Result<(), Ext4Error> {
+    if block.block_index.value() == 0 {
+        let new_block_index =
+            fs.alloc_block(NonZeroU32::new(1).unwrap()).await?;
+        *allocated = allocated.checked_add(1).unwrap();
+        *block = IndirectBlock::new(BlockIndex(
+            u32::try_from(new_block_index).unwrap(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) struct BlockMap {
     fs: Ext4,
     direct_blocks: [u32; DIRECT_BLOCKS],
@@ -329,16 +346,12 @@ impl BlockMap {
             let single_indirect_index = usize_from_u32(file_block_index)
                 .checked_sub(DIRECT_BLOCKS)
                 .unwrap();
-            if self.single_indirect_block.block_index.value() == 0 {
-                // TODO: make block allocation u32 but actually where the inode is
-                let new_block_index =
-                    self.fs.alloc_block(NonZeroU32::new(1).unwrap()).await?;
-                allocated_metadata_blocks =
-                    allocated_metadata_blocks.checked_add(1).unwrap();
-                self.single_indirect_block = IndirectBlock::new(BlockIndex(
-                    u32::try_from(new_block_index).unwrap(),
-                ));
-            }
+            ensure_allocated(
+                &mut self.single_indirect_block,
+                &mut allocated_metadata_blocks,
+                &self.fs,
+            )
+            .await?;
             self.single_indirect_block
                 .set(
                     single_indirect_index,
@@ -365,27 +378,27 @@ impl BlockMap {
                 .unwrap();
             let first_level_index = double_indirect_index / blocks_per_block;
             let second_level_index = double_indirect_index % blocks_per_block;
-            if self.double_indirect_block.block_index.value() == 0 {
-                let new_block_index =
-                    self.fs.alloc_block(NonZeroU32::new(1).unwrap()).await?;
-                allocated_metadata_blocks =
-                    allocated_metadata_blocks.checked_add(1).unwrap();
-                self.double_indirect_block = IndirectBlock::new(BlockIndex(
-                    u32::try_from(new_block_index).unwrap(),
-                ));
-            }
+            ensure_allocated(
+                &mut self.double_indirect_block,
+                &mut allocated_metadata_blocks,
+                &self.fs,
+            )
+            .await?;
             let mut first_level_block = self
                 .double_indirect_block
                 .get(first_level_index, &self.fs)
                 .await?;
+            let mut needs_set = false;
             if first_level_block.block_index.value() == 0 {
-                let new_block_index =
-                    self.fs.alloc_block(NonZeroU32::new(1).unwrap()).await?;
-                allocated_metadata_blocks =
-                    allocated_metadata_blocks.checked_add(1).unwrap();
-                first_level_block = IndirectBlock::new(BlockIndex(
-                    u32::try_from(new_block_index).unwrap(),
-                ));
+                ensure_allocated(
+                    &mut first_level_block,
+                    &mut allocated_metadata_blocks,
+                    &self.fs,
+                )
+                .await?;
+                needs_set = true;
+            }
+            if needs_set {
                 self.double_indirect_block
                     .set(
                         first_level_index,
@@ -439,27 +452,27 @@ impl BlockMap {
             let second_level_index =
                 (triple_indirect_index / blocks_per_block) % blocks_per_block;
             let third_level_index = triple_indirect_index % blocks_per_block;
-            if self.triple_indirect_block.block_index.value() == 0 {
-                let new_block_index =
-                    self.fs.alloc_block(NonZeroU32::new(1).unwrap()).await?;
-                allocated_metadata_blocks =
-                    allocated_metadata_blocks.checked_add(1).unwrap();
-                self.triple_indirect_block = IndirectBlock::new(BlockIndex(
-                    u32::try_from(new_block_index).unwrap(),
-                ));
-            }
+            ensure_allocated(
+                &mut self.triple_indirect_block,
+                &mut allocated_metadata_blocks,
+                &self.fs,
+            )
+            .await?;
             let mut first_level_block = self
                 .triple_indirect_block
                 .get(first_level_index, &self.fs)
                 .await?;
+            let mut first_needs_set = false;
             if first_level_block.block_index.value() == 0 {
-                let new_block_index =
-                    self.fs.alloc_block(NonZeroU32::new(1).unwrap()).await?;
-                allocated_metadata_blocks =
-                    allocated_metadata_blocks.checked_add(1).unwrap();
-                first_level_block = IndirectBlock::new(BlockIndex(
-                    u32::try_from(new_block_index).unwrap(),
-                ));
+                ensure_allocated(
+                    &mut first_level_block,
+                    &mut allocated_metadata_blocks,
+                    &self.fs,
+                )
+                .await?;
+                first_needs_set = true;
+            }
+            if first_needs_set {
                 self.triple_indirect_block
                     .set(
                         first_level_index,
@@ -470,14 +483,17 @@ impl BlockMap {
             }
             let mut second_level_block =
                 first_level_block.get(second_level_index, &self.fs).await?;
+            let mut second_needs_set = false;
             if second_level_block.block_index.value() == 0 {
-                let new_block_index =
-                    self.fs.alloc_block(NonZeroU32::new(1).unwrap()).await?;
-                allocated_metadata_blocks =
-                    allocated_metadata_blocks.checked_add(1).unwrap();
-                second_level_block = IndirectBlock::new(BlockIndex(
-                    u32::try_from(new_block_index).unwrap(),
-                ));
+                ensure_allocated(
+                    &mut second_level_block,
+                    &mut allocated_metadata_blocks,
+                    &self.fs,
+                )
+                .await?;
+                second_needs_set = true;
+            }
+            if second_needs_set {
                 first_level_block
                     .set(
                         second_level_index,
