@@ -4,6 +4,7 @@
 
 - Add `multi-threading` feature flag so that thread safety can be opted out for single-threaded environments.
 - Add xattr support: `Ext4::get_xattr`, `Ext4::set_xattr`, `Ext4::remove_xattr`, and `Ext4::list_xattrs` as well as `Inode` methods.
+    - Doesn't support very large amounts of xattrs
 
 ## 0.1.0-beta.1
 
