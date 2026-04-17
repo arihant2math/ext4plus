@@ -36,6 +36,8 @@ license = "MIT OR Apache-2.0"
 anyhow = { version = "1.0.0", features = ["backtrace"] }
 
 [features]
+default = ["multi-threaded"]
+multi-threaded = []
 std = []
 sync = ["maybe-async/is_sync", "dep:spin"]
 

@@ -144,7 +144,6 @@ mod test_util;
 
 use alloc::boxed::Box;
 use alloc::string::String;
-use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use bitmap::BitmapHandle;
@@ -166,6 +165,7 @@ use iters::file_blocks::FileBlocks;
 use journal::Journal;
 use path::{Path, PathBuf};
 use superblock::Superblock;
+use sync::PtrPrimitive;
 use util::{u64_from_usize, usize_from_u32};
 
 pub use dir_entry::{DirEntry, DirEntryName, DirEntryNameError};
@@ -199,7 +199,7 @@ struct Ext4Inner {
 ///
 /// [ext4]: https://en.wikipedia.org/wiki/Ext4
 #[derive(Clone)]
-pub struct Ext4(Arc<Ext4Inner>);
+pub struct Ext4(PtrPrimitive<Ext4Inner>);
 
 impl Ext4 {
     /// Load an `Ext4` instance from the given `reader`.
@@ -234,7 +234,7 @@ impl Ext4 {
         if superblock.read_only() {
             writer = None;
         }
-        let mut fs = Self(Arc::new(Ext4Inner {
+        let mut fs = Self(PtrPrimitive::new(Ext4Inner {
             block_group_descriptors: BlockGroupDescriptor::read_all(
                 &superblock,
                 &mut *reader,
@@ -250,8 +250,8 @@ impl Ext4 {
 
         // Load the actual journal, if present.
         let journal = Journal::load(&fs).await?;
-        // OK to unwrap: the journal is stored in an `Arc`, but we haven't cloned it yet, so we have unique access to it.
-        Arc::get_mut(&mut fs.0).unwrap().journal = journal;
+        // OK to unwrap: the journal is stored in an `Arc`/`Rc`, but we haven't cloned it yet, so we have unique access to it.
+        PtrPrimitive::get_mut(&mut fs.0).unwrap().journal = journal;
 
         Ok(fs)
     }
