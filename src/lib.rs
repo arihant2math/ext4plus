@@ -1062,6 +1062,70 @@ impl Ext4 {
         parent_dir.link(name, &mut inode).await?;
         Ok(inode)
     }
+
+    /// List the extended attributes for `path`.
+    #[maybe_async::maybe_async]
+    pub async fn list_xattrs<'p, P>(
+        &self,
+        path: P,
+    ) -> Result<Vec<Vec<u8>>, Ext4Error>
+    where
+        P: TryInto<Path<'p>>,
+    {
+        let path = path.try_into().map_err(|_| Ext4Error::MalformedPath)?;
+        let inode = self.path_to_inode(path, FollowSymlinks::All).await?;
+        inode.list_xattrs(self).await
+    }
+
+    /// Get an extended attribute from `path`.
+    #[maybe_async::maybe_async]
+    pub async fn get_xattr<'p, P, N>(
+        &self,
+        path: P,
+        name: N,
+    ) -> Result<Option<Vec<u8>>, Ext4Error>
+    where
+        P: TryInto<Path<'p>>,
+        N: AsRef<[u8]>,
+    {
+        let path = path.try_into().map_err(|_| Ext4Error::MalformedPath)?;
+        let inode = self.path_to_inode(path, FollowSymlinks::All).await?;
+        inode.get_xattr(self, name).await
+    }
+
+    /// Set an extended attribute on `path`.
+    #[maybe_async::maybe_async]
+    pub async fn set_xattr<'p, P, N, V>(
+        &self,
+        path: P,
+        name: N,
+        value: V,
+    ) -> Result<(), Ext4Error>
+    where
+        P: TryInto<Path<'p>>,
+        N: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        let path = path.try_into().map_err(|_| Ext4Error::MalformedPath)?;
+        let mut inode = self.path_to_inode(path, FollowSymlinks::All).await?;
+        inode.set_xattr(self, name, value).await
+    }
+
+    /// Remove an extended attribute from `path`.
+    #[maybe_async::maybe_async]
+    pub async fn remove_xattr<'p, P, N>(
+        &self,
+        path: P,
+        name: N,
+    ) -> Result<(), Ext4Error>
+    where
+        P: TryInto<Path<'p>>,
+        N: AsRef<[u8]>,
+    {
+        let path = path.try_into().map_err(|_| Ext4Error::MalformedPath)?;
+        let mut inode = self.path_to_inode(path, FollowSymlinks::All).await?;
+        inode.remove_xattr(self, name).await
+    }
 }
 
 /// These methods mirror the [`std::fs`][stdfs] API.

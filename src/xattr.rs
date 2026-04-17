@@ -273,21 +273,6 @@ fn serialize_xattrs_to_ibody(
 }
 
 impl Inode {
-    fn file_acl(&self) -> u64 {
-        let i_file_acl_lo = read_u32le(&self.inode_data, 0x68);
-        let i_file_acl_high = read_u16le(&self.inode_data, 0x76);
-        u64_from_hilo(u32::from(i_file_acl_high), i_file_acl_lo)
-    }
-
-    fn set_file_acl(&mut self, file_acl: u64) {
-        let file_acl_hi = u32::try_from(file_acl >> 32).unwrap();
-        let file_acl_lo = u32::try_from(file_acl & 0xffff_ffff).unwrap();
-        let (file_acl_hi_hi, file_acl_hi_lo) = u32_to_hilo(file_acl_hi);
-        assert_eq!(file_acl_hi_hi, 0);
-        write_u32le(&mut self.inode_data, 0x68, file_acl_lo);
-        write_u16le(&mut self.inode_data, 0x76, file_acl_hi_lo);
-    }
-
     #[maybe_async::maybe_async]
     async fn read_xattrs(
         &self,
@@ -479,72 +464,6 @@ impl Inode {
         }
 
         self.write(ext4).await
-    }
-}
-
-impl Ext4 {
-    /// List the extended attributes for `path`.
-    #[maybe_async::maybe_async]
-    pub async fn list_xattrs<'p, P>(
-        &self,
-        path: P,
-    ) -> Result<Vec<Vec<u8>>, Ext4Error>
-    where
-        P: TryInto<Path<'p>>,
-    {
-        let path = path.try_into().map_err(|_| Ext4Error::MalformedPath)?;
-        let inode = self.path_to_inode(path, FollowSymlinks::All).await?;
-        inode.list_xattrs(self).await
-    }
-
-    /// Get an extended attribute from `path`.
-    #[maybe_async::maybe_async]
-    pub async fn get_xattr<'p, P, N>(
-        &self,
-        path: P,
-        name: N,
-    ) -> Result<Option<Vec<u8>>, Ext4Error>
-    where
-        P: TryInto<Path<'p>>,
-        N: AsRef<[u8]>,
-    {
-        let path = path.try_into().map_err(|_| Ext4Error::MalformedPath)?;
-        let inode = self.path_to_inode(path, FollowSymlinks::All).await?;
-        inode.get_xattr(self, name).await
-    }
-
-    /// Set an extended attribute on `path`.
-    #[maybe_async::maybe_async]
-    pub async fn set_xattr<'p, P, N, V>(
-        &self,
-        path: P,
-        name: N,
-        value: V,
-    ) -> Result<(), Ext4Error>
-    where
-        P: TryInto<Path<'p>>,
-        N: AsRef<[u8]>,
-        V: AsRef<[u8]>,
-    {
-        let path = path.try_into().map_err(|_| Ext4Error::MalformedPath)?;
-        let mut inode = self.path_to_inode(path, FollowSymlinks::All).await?;
-        inode.set_xattr(self, name, value).await
-    }
-
-    /// Remove an extended attribute from `path`.
-    #[maybe_async::maybe_async]
-    pub async fn remove_xattr<'p, P, N>(
-        &self,
-        path: P,
-        name: N,
-    ) -> Result<(), Ext4Error>
-    where
-        P: TryInto<Path<'p>>,
-        N: AsRef<[u8]>,
-    {
-        let path = path.try_into().map_err(|_| Ext4Error::MalformedPath)?;
-        let mut inode = self.path_to_inode(path, FollowSymlinks::All).await?;
-        inode.remove_xattr(self, name).await
     }
 }
 

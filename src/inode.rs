@@ -795,6 +795,21 @@ impl Inode {
         self.inode_data[0x20..0x24]
             .copy_from_slice(&flags.bits().to_le_bytes());
     }
+
+    pub(crate) fn file_acl(&self) -> u64 {
+        let i_file_acl_lo = read_u32le(&self.inode_data, 0x68);
+        let i_file_acl_high = read_u16le(&self.inode_data, 0x76);
+        u64_from_hilo(u32::from(i_file_acl_high), i_file_acl_lo)
+    }
+
+    pub(crate) fn set_file_acl(&mut self, file_acl: u64) {
+        let file_acl_hi = u32::try_from(file_acl >> 32).unwrap();
+        let file_acl_lo = u32::try_from(file_acl & 0xffff_ffff).unwrap();
+        let (file_acl_hi_hi, file_acl_hi_lo) = u32_to_hilo(file_acl_hi);
+        assert_eq!(file_acl_hi_hi, 0);
+        write_u32le(&mut self.inode_data, 0x68, file_acl_lo);
+        write_u16le(&mut self.inode_data, 0x76, file_acl_hi_lo);
+    }
 }
 
 pub(crate) fn get_inode_block_group_location(
