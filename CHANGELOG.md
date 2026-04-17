@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Add `multi-threading` feature flag so that thread safety can be opted out for single-threaded environments.
+
 ## 0.1.0-beta.1
 
 - BREAKING: Require mutable dir for `Ext4::symlink` and mutable self for `Dir::link` and `Dir::unlink`.
