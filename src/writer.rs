@@ -23,9 +23,8 @@ fn write_to_bytes(dst: &mut [u8], start_byte: u64, src: &[u8]) -> Option<()> {
 /// file or device.
 ///
 /// [`Ext4`]: crate::Ext4
-#[cfg(not(feature = "multi-threaded"))]
-#[maybe_async::maybe_async]
-#[cfg_attr(not(feature = "sync"), async_trait(?Send))]
+#[cfg(all(not(feature = "multi-threaded"), not(feature = "sync")))]
+#[async_trait(?Send)]
 pub trait Ext4Write {
     /// Write bytes from `src`, starting at `start_byte`.
     async fn write(
@@ -39,9 +38,18 @@ pub trait Ext4Write {
 /// file or device.
 ///
 /// [`Ext4`]: crate::Ext4
-#[cfg(feature = "multi-threaded")]
-#[maybe_async::maybe_async]
-#[cfg_attr(not(feature = "sync"), async_trait)]
+#[cfg(all(not(feature = "multi-threaded"), feature = "sync"))]
+pub trait Ext4Write {
+    /// Write bytes from `src`, starting at `start_byte`.
+    fn write(&self, start_byte: u64, src: &[u8]) -> Result<(), BoxedError>;
+}
+
+/// Interface used by [`Ext4`] to write the filesystem data to a storage
+/// file or device.
+///
+/// [`Ext4`]: crate::Ext4
+#[cfg(all(feature = "multi-threaded", not(feature = "sync")))]
+#[async_trait]
 pub trait Ext4Write: Send + Sync {
     /// Write bytes from `src`, starting at `start_byte`.
     async fn write(
@@ -51,9 +59,22 @@ pub trait Ext4Write: Send + Sync {
     ) -> Result<(), BoxedError>;
 }
 
-#[cfg(feature = "std")]
-#[maybe_async::maybe_async]
-#[cfg_attr(not(feature = "sync"), async_trait)]
+/// Interface used by [`Ext4`] to write the filesystem data to a storage
+/// file or device.
+///
+/// [`Ext4`]: crate::Ext4
+#[cfg(all(feature = "multi-threaded", feature = "sync"))]
+pub trait Ext4Write: Send + Sync {
+    /// Write bytes from `src`, starting at `start_byte`.
+    fn write(&self, start_byte: u64, src: &[u8]) -> Result<(), BoxedError>;
+}
+
+#[cfg(all(
+    feature = "std",
+    not(feature = "multi-threaded"),
+    not(feature = "sync")
+))]
+#[async_trait(?Send)]
 impl Ext4Write for Mutex<Vec<u8>> {
     async fn write(
         &self,
@@ -72,9 +93,68 @@ impl Ext4Write for Mutex<Vec<u8>> {
     }
 }
 
-#[cfg(feature = "multi-threaded")]
-#[maybe_async::maybe_async]
-#[cfg_attr(not(feature = "sync"), async_trait)]
+#[cfg(all(feature = "std", feature = "multi-threaded", not(feature = "sync")))]
+#[async_trait]
+impl Ext4Write for Mutex<Vec<u8>> {
+    async fn write(
+        &self,
+        start_byte: u64,
+        src: &[u8],
+    ) -> Result<(), BoxedError> {
+        let mut guard = self.lock().unwrap();
+        write_to_bytes(guard.as_mut(), start_byte, src).ok_or_else(|| {
+            Box::new(crate::mem_io_error::MemIoError {
+                start: start_byte,
+                read_len: src.len(),
+                src_len: guard.len(),
+            })
+            .into()
+        })
+    }
+}
+
+#[cfg(all(feature = "std", feature = "sync"))]
+impl Ext4Write for Mutex<Vec<u8>> {
+    fn write(&self, start_byte: u64, src: &[u8]) -> Result<(), BoxedError> {
+        let mut guard = self.lock().unwrap();
+        write_to_bytes(guard.as_mut(), start_byte, src).ok_or_else(|| {
+            Box::new(crate::mem_io_error::MemIoError {
+                start: start_byte,
+                read_len: src.len(),
+                src_len: guard.len(),
+            })
+            .into()
+        })
+    }
+}
+
+#[cfg(all(not(feature = "multi-threaded"), not(feature = "sync")))]
+#[async_trait(?Send)]
+impl<T> Ext4Write for alloc::rc::Rc<T>
+where
+    T: Ext4Write,
+{
+    async fn write(
+        &self,
+        start_byte: u64,
+        src: &[u8],
+    ) -> Result<(), BoxedError> {
+        (**self).write(start_byte, src).await
+    }
+}
+
+#[cfg(all(not(feature = "multi-threaded"), feature = "sync"))]
+impl<T> Ext4Write for alloc::rc::Rc<T>
+where
+    T: Ext4Write,
+{
+    fn write(&self, start_byte: u64, src: &[u8]) -> Result<(), BoxedError> {
+        (**self).write(start_byte, src)
+    }
+}
+
+#[cfg(all(feature = "multi-threaded", not(feature = "sync")))]
+#[async_trait]
 impl<T> Ext4Write for alloc::sync::Arc<T>
 where
     T: Ext4Write,
@@ -85,5 +165,15 @@ where
         src: &[u8],
     ) -> Result<(), BoxedError> {
         (**self).write(start_byte, src).await
+    }
+}
+
+#[cfg(all(feature = "multi-threaded", feature = "sync"))]
+impl<T> Ext4Write for alloc::sync::Arc<T>
+where
+    T: Ext4Write,
+{
+    fn write(&self, start_byte: u64, src: &[u8]) -> Result<(), BoxedError> {
+        (**self).write(start_byte, src)
     }
 }
