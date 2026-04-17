@@ -25,7 +25,7 @@ This has known limitations due to features needing to be additive, but it should
 ## Limitations
 
 - Lack of write support for journaling, although journaling can be read. It is recommended to disable journaling when using this library.
-- No support for reading or writing extended attributes (xattrs) (by extension ACLs and SELinux labels).
+- Limited extended attribute (xattr) support. Small xattrs can be read and written when they fit in the inode body. Writing external xattr blocks is not supported yet.
 
 Everything else should be fully supported, minus the features listed in the compatibility section below.
 
@@ -60,7 +60,7 @@ Near-term goals (pre-0.1.0):
 
 Goals that are also being worked on, but are not necessarily pre-0.1.0:
 
-- extended attribute support (maybe pre-0.1.0)
+- fuller extended attribute support (external xattr block writes)
 - inline data support
 - journaling write support
 - gdt checksum support

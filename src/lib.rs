@@ -138,6 +138,7 @@ pub mod sync;
 mod util;
 mod uuid;
 mod writer;
+mod xattr;
 
 #[cfg(all(test, feature = "std"))]
 mod test_util;

@@ -60,6 +60,9 @@ pub enum Ext4Error {
     /// Data cannot be converted into a valid path.
     MalformedPath,
 
+    /// Data cannot be converted into a valid extended attribute name.
+    InvalidXattrName,
+
     /// Path is too long.
     ///
     /// Maximum path length is not strictly enforced by this library for
@@ -132,6 +135,9 @@ impl Display for Ext4Error {
             }
             Self::NotUtf8 => write!(f, "data is not utf-8"),
             Self::MalformedPath => write!(f, "data is not a valid path"),
+            Self::InvalidXattrName => {
+                write!(f, "data is not a valid extended attribute name")
+            }
             Self::PathTooLong => write!(f, "path is too long"),
             Self::TooManySymlinks => {
                 write!(f, "too many levels of symbolic links")
@@ -163,6 +169,7 @@ impl From<Ext4Error> for std::io::Error {
         match e {
             Ext4Error::IsASpecialFile
             | Ext4Error::MalformedPath
+            | Ext4Error::InvalidXattrName
             | Ext4Error::NotASymlink
             | Ext4Error::NotAbsolute => InvalidInput.into(),
 
@@ -343,6 +350,9 @@ pub(crate) enum CorruptKind {
 
     /// An extent points to an invalid block.
     ExtentBlock(InodeIndex),
+
+    /// Extended attribute data is invalid.
+    Xattr(InodeIndex),
 
     /// A block in the extent is larger than 48 bits
     ExtentBlockOverflow(u64),
@@ -543,6 +553,9 @@ impl Display for CorruptKind {
             }
             Self::ExtentBlock(inode) => {
                 write!(f, "extent in inode {inode} points to an invalid block")
+            }
+            Self::Xattr(inode) => {
+                write!(f, "extended attribute data in inode {inode} is invalid")
             }
             Self::ExtentBlockOverflow(block) => {
                 write!(f, "extent block {block} is larger than 48 bits")
