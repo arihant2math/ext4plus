@@ -96,3 +96,9 @@ mod sync_inner {
 pub use self::async_inner::*;
 #[cfg(feature = "sync")]
 pub use self::sync_inner::*;
+
+#[cfg(not(feature = "multi-threaded"))]
+pub(crate) type PtrPrimitive<T> = alloc::rc::Rc<T>;
+
+#[cfg(feature = "multi-threaded")]
+pub(crate) type PtrPrimitive<T> = alloc::sync::Arc<T>;
