@@ -10,12 +10,7 @@
 use crate::Ext4;
 use crate::error::{CorruptKind, Ext4Error};
 use crate::inode::Inode;
-use crate::path::Path;
-use crate::resolve::FollowSymlinks;
-use crate::util::{
-    read_u16le, read_u32le, u32_to_hilo, u64_from_hilo, write_u16le,
-    write_u32le,
-};
+use crate::util::{read_u16le, read_u32le, write_u16le, write_u32le};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -59,7 +54,9 @@ impl XattrEntry {
             _ => return Err(CorruptKind::Xattr(inode.index).into()),
         };
 
-        let mut full_name = Vec::with_capacity(prefix.len() + self.name.len());
+        let mut full_name = Vec::with_capacity(
+            prefix.len().checked_add(self.name.len()).unwrap(),
+        );
         full_name.extend_from_slice(prefix);
         full_name.extend_from_slice(&self.name);
         Ok(full_name)
@@ -133,14 +130,19 @@ fn parse_xattr_entries(
 
     loop {
         let sentinel = storage
-            .get(entry_offset..entry_offset + 4)
+            .get(entry_offset..entry_offset.checked_add(4).unwrap())
             .ok_or_else(|| Ext4Error::from(CorruptKind::Xattr(inode.index)))?;
         if sentinel == [0, 0, 0, 0] {
             break;
         }
 
         let entry = storage
-            .get(entry_offset..entry_offset + EXT4_XATTR_ENTRY_BASE_SIZE)
+            .get(
+                entry_offset
+                    ..entry_offset
+                        .checked_add(EXT4_XATTR_ENTRY_BASE_SIZE)
+                        .unwrap(),
+            )
             .ok_or_else(|| Ext4Error::from(CorruptKind::Xattr(inode.index)))?;
         let name_len = usize::from(entry[0]);
         if name_len == 0 {
@@ -150,7 +152,7 @@ fn parse_xattr_entries(
         let record_len =
             align_4(EXT4_XATTR_ENTRY_BASE_SIZE.checked_add(name_len).unwrap());
         let entry = storage
-            .get(entry_offset..entry_offset + record_len)
+            .get(entry_offset..entry_offset.checked_add(record_len).unwrap())
             .ok_or_else(|| Ext4Error::from(CorruptKind::Xattr(inode.index)))?;
 
         let value_offs = usize::from(read_u16le(entry, 2));
@@ -230,14 +232,14 @@ fn serialize_xattrs_to_ibody(
         if value_padded_len > value_cursor {
             return Err(Ext4Error::NoSpace);
         }
-        value_cursor -= value_padded_len;
+        value_cursor = value_cursor.checked_sub(value_padded_len).unwrap();
 
         if next_entry_offset > value_cursor {
             return Err(Ext4Error::NoSpace);
         }
 
         storage[entry_offset] = u8::try_from(entry.name.len()).unwrap();
-        storage[entry_offset + 1] = entry.name_index;
+        storage[entry_offset.checked_add(1).unwrap()] = entry.name_index;
 
         let value_offs = if value_len == 0 {
             0
@@ -249,24 +251,31 @@ fn serialize_xattrs_to_ibody(
             )
             .map_err(|_| Ext4Error::NoSpace)?
         };
-        write_u16le(&mut storage, entry_offset + 2, value_offs);
-        write_u32le(&mut storage, entry_offset + 4, 0);
+        write_u16le(
+            &mut storage,
+            entry_offset.checked_add(2).unwrap(),
+            value_offs,
+        );
+        write_u32le(&mut storage, entry_offset.checked_add(4).unwrap(), 0);
         write_u32le(
             &mut storage,
-            entry_offset + 8,
+            entry_offset.checked_add(8).unwrap(),
             u32::try_from(value_len).map_err(|_| Ext4Error::NoSpace)?,
         );
-        write_u32le(&mut storage, entry_offset + 12, 0);
-        storage[entry_offset + EXT4_XATTR_ENTRY_BASE_SIZE
-            ..entry_offset + EXT4_XATTR_ENTRY_BASE_SIZE + entry.name.len()]
+        write_u32le(&mut storage, entry_offset.checked_add(12).unwrap(), 0);
+        let name_offset = entry_offset
+            .checked_add(EXT4_XATTR_ENTRY_BASE_SIZE)
+            .unwrap();
+        storage
+            [name_offset..name_offset.checked_add(entry.name.len()).unwrap()]
             .copy_from_slice(&entry.name);
 
         if value_len != 0 {
-            storage[value_cursor..value_cursor + value_len]
+            storage[value_cursor..value_cursor.checked_add(value_len).unwrap()]
                 .copy_from_slice(&entry.value);
         }
 
-        entry_offset += record_len;
+        entry_offset = entry_offset.checked_add(record_len).unwrap();
     }
 
     Ok(storage)
