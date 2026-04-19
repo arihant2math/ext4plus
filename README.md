@@ -17,6 +17,14 @@ Additionally, due to the need for more low-level access to the filesystem, this 
 The two APIs that are exposed are the "raw" API, which is intended for OS drivers,
 and the "std::fs" API, which replicates the standard library's `std::fs` API as closely as possible.
 
+## Stability
+
+This library is currently in pre-0.1.0 and in beta. The API is stable until 0.1.0.
+
+A few experimental OSes are using this library as a filesystem driver.
+
+Currently, there are known bugs, and it is recommended to use this library on ramdisks if writing.
+
 ## Sync vs Async
 
 While this library is async-first, sync APIs are provided via the `sync` feature.
@@ -28,8 +36,6 @@ This has known limitations due to features needing to be additive, but it should
 - Limited extended attribute (xattr) support. Small xattrs can be read and written when they fit in the inode body. Writing external xattr blocks is not supported yet.
 
 Everything else should be fully supported, minus the features listed in the compatibility section below.
-
-
 
 ### Compatibility
 
