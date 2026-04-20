@@ -1316,7 +1316,7 @@ mod tests {
     use crate::block_index::FsBlockIndex;
     use crate::file_blocks::extent_tree::ExtentTree;
     use crate::inode::Inode;
-    use crate::test_util::load_test_disk1_rw;
+    use crate::test_util::{load_test_disk1_rw, load_test_disk1_rw_no_fsck};
 
     use super::{
         CorruptKind, ENTRY_SIZE_IN_BYTES, Ext4, Ext4Error, ExtentInternalNode,
@@ -1516,8 +1516,8 @@ mod tests {
         async(not(feature = "sync"), tokio::test)
     )]
     async fn test_extent_tree_internal_nodes_checksum_mismatch_is_detected() {
-        let fs = load_test_disk1_rw().await;
-        let ext4 = fs.0.clone();
+        let fs = load_test_disk1_rw_no_fsck().await;
+        let ext4 = fs.clone();
         if !ext4.has_metadata_checksums() {
             // If the test image doesn't have metadata checksums enabled, there's nothing to test.
             return;

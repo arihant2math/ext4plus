@@ -821,3 +821,158 @@ async fn test_htree_many_dir_entries() {
         assert!(matches!(err, Ext4Error::NotFound));
     }
 }
+
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
+async fn multi_op_test() {
+    let fses = [load_test_disk1_rw().await, load_ext2_rw().await];
+
+    for fs in fses {
+        let mut root_dir =
+            Dir::open_inode(&fs.0, fs.read_root_inode().await.unwrap())
+                .unwrap();
+
+        let mut one_inode = fs
+            .create_inode(InodeCreationOptions {
+                file_type: FileType::Regular,
+                mode: InodeMode::S_IRUSR
+                    | InodeMode::S_IWUSR
+                    | InodeMode::S_IFREG,
+                uid: 0,
+                gid: 0,
+                time: Default::default(),
+                flags: InodeFlags::empty(),
+            })
+            .await
+            .unwrap();
+        root_dir
+            .link(DirEntryName::try_from(b"one.txt").unwrap(), &mut one_inode)
+            .await
+            .unwrap();
+        let mut one_file = File::open_inode(&fs, one_inode).unwrap();
+        assert_eq!(one_file.write_bytes(b"Hello, world!").await.unwrap(), 13);
+
+        let test_dir_inode = fs
+            .create_inode(InodeCreationOptions {
+                file_type: FileType::Directory,
+                mode: InodeMode::S_IRUSR
+                    | InodeMode::S_IWUSR
+                    | InodeMode::S_IXUSR
+                    | InodeMode::S_IFDIR,
+                uid: 0,
+                gid: 0,
+                time: Default::default(),
+                flags: InodeFlags::empty(),
+            })
+            .await
+            .unwrap();
+        let mut test_dir =
+            Dir::init(fs.clone(), test_dir_inode, root_dir.inode().index)
+                .await
+                .unwrap();
+        root_dir
+            .link(
+                DirEntryName::try_from(b"test").unwrap(),
+                test_dir.inode_mut(),
+            )
+            .await
+            .unwrap();
+
+        let mut test_one_inode = fs
+            .create_inode(InodeCreationOptions {
+                file_type: FileType::Regular,
+                mode: InodeMode::S_IRUSR
+                    | InodeMode::S_IWUSR
+                    | InodeMode::S_IFREG,
+                uid: 0,
+                gid: 0,
+                time: Default::default(),
+                flags: InodeFlags::empty(),
+            })
+            .await
+            .unwrap();
+        test_dir
+            .link(
+                DirEntryName::try_from(b"one.txt").unwrap(),
+                &mut test_one_inode,
+            )
+            .await
+            .unwrap();
+        let mut test_one_file = File::open_inode(&fs, test_one_inode).unwrap();
+        let test_one_data = b"hi".repeat(1000);
+        let mut test_one_written = 0;
+        while test_one_written < test_one_data.len() {
+            let n = test_one_file
+                .write_bytes(&test_one_data[test_one_written..])
+                .await
+                .unwrap();
+            assert!(n > 0);
+            test_one_written += n;
+        }
+        assert_eq!(test_one_written, test_one_data.len());
+
+        let mut test_two_inode = fs
+            .create_inode(InodeCreationOptions {
+                file_type: FileType::Regular,
+                mode: InodeMode::S_IRUSR
+                    | InodeMode::S_IWUSR
+                    | InodeMode::S_IFREG,
+                uid: 0,
+                gid: 0,
+                time: Default::default(),
+                flags: InodeFlags::empty(),
+            })
+            .await
+            .unwrap();
+        test_dir
+            .link(
+                DirEntryName::try_from(b"two.txt").unwrap(),
+                &mut test_two_inode,
+            )
+            .await
+            .unwrap();
+        let mut test_two_file = File::open_inode(&fs, test_two_inode).unwrap();
+        let test_two_data = b"Lorem Ipsum".repeat(5000);
+        let mut test_two_written = 0;
+        while test_two_written < test_two_data.len() {
+            let n = test_two_file
+                .write_bytes(&test_two_data[test_two_written..])
+                .await
+                .unwrap();
+            assert!(n > 0);
+            test_two_written += n;
+        }
+        assert_eq!(test_two_written, test_two_data.len());
+
+        assert_eq!(one_file.write_bytes(b" Bye, world!").await.unwrap(), 12);
+
+        assert_eq!(
+            fs.read("/one.txt").await.unwrap(),
+            b"Hello, world! Bye, world!"
+        );
+        assert_eq!(fs.read("/test/one.txt").await.unwrap(), test_one_data);
+        assert_eq!(fs.read("/test/two.txt").await.unwrap(), test_two_data);
+
+        let test_dir_inode = fs
+            .path_to_inode(Path::new("/test"), FollowSymlinks::All)
+            .await
+            .unwrap();
+        assert_eq!(test_dir_inode.metadata().file_type, FileType::Directory);
+
+        let test_dir = Dir::open_inode(&fs.0, test_dir_inode).unwrap();
+        assert!(
+            test_dir
+                .get_entry(DirEntryName::try_from(b"one.txt").unwrap())
+                .await
+                .is_ok()
+        );
+        assert!(
+            test_dir
+                .get_entry(DirEntryName::try_from(b"two.txt").unwrap())
+                .await
+                .is_ok()
+        );
+    }
+}
