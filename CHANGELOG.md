@@ -6,6 +6,7 @@
 - Add `Superblock::creator_os`, `Superblock::mount_time`, and `Superblock::mkfs_time`.
 - Ensure proper xattr feature exists in filesystem before allowing xattr operations.
 - Add `FilesystemFeatures` struct to get a more detailed view of the features of the filesystem, exposes struct via `Superblock::features`.
+- Fix edge cases with reading/writing traits
 
 ## 0.1.0-beta.2
 
