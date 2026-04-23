@@ -19,9 +19,35 @@ use crate::util::{
     read_u16le, read_u32le, u64_from_hilo, u64_to_hilo, write_u32le,
 };
 use crate::{Ext4, Label, Uuid};
+use core::fmt::Display;
 use core::num::NonZeroU32;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use core::time::Duration;
+
+/// Creator of the filesystem
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CreatorOS(u32);
+
+impl CreatorOS {
+    /// Numerical ID of creator OS
+    #[must_use]
+    pub fn value(&self) -> u32 {
+        self.0
+    }
+}
+
+impl Display for CreatorOS {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.value() {
+            0 => write!(f, "Linux"),
+            1 => write!(f, "Hurd"),
+            2 => write!(f, "Masix"),
+            3 => write!(f, "FreeBSD"),
+            4 => write!(f, "Lites"),
+            other => write!(f, "FsCreator({})", other),
+        }
+    }
+}
 
 /// Information about the filesystem.
 #[derive(Debug)]
@@ -420,6 +446,12 @@ impl Superblock {
             .checked_add(u64::from(m_time_high) << 32)
             .unwrap();
         Duration::from_secs(mtime)
+    }
+
+    /// Get the creator OS
+    pub fn creator_os(&self) -> CreatorOS {
+        let creator_os = read_u32le(&self.data, 0x48);
+        CreatorOS(creator_os)
     }
 }
 
