@@ -614,8 +614,8 @@ impl Dir {
     ///
     /// # Errors
     ///
-    /// If links_count of the target is u16::MAX - 1, an error will be returned.
-    /// Likewise, an error will be returned if links_count of the parent is u16::MAX - 1,
+    /// If `links_count` of the target is `u16::MAX - 1`, an error will be returned.
+    /// Likewise, an error will be returned if `links_count` of the parent is `u16::MAX - 1`,
     /// and the target is a directory.
     ///
     /// [`Ext4Error::AlreadyExists`] will be returned if an entry with the same name is already present.

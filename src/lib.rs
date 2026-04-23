@@ -1027,7 +1027,8 @@ impl Ext4 {
     /// Create a symbolic link at `path` pointing to `target`.
     ///
     /// # Errors
-    /// See [`Dir::link`]
+    /// See [`Dir::link`] for linking errors. Read-only filesystem cannot be written to.
+    /// If an inode cannot be allocated an error is returned as well.
     #[maybe_async::maybe_async]
     pub async fn symlink(
         &self,
