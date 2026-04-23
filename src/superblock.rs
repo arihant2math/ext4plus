@@ -263,8 +263,9 @@ impl Superblock {
         data
     }
 
+    /// Write any superblock changes back to the disk
     #[maybe_async::maybe_async]
-    pub(crate) async fn write(&self, ext4: &Ext4) -> Result<(), Ext4Error> {
+    pub async fn write(&self, ext4: &Ext4) -> Result<(), Ext4Error> {
         let data = self.to_bytes();
         // start byte
         let offset = 1024;
@@ -291,7 +292,8 @@ impl Superblock {
         self.inode_size
     }
 
-    pub(crate) fn inodes_per_block_group(&self) -> NonZeroU32 {
+    /// Number of inodes in a block group, some could be unused.
+    pub fn inodes_per_block_group(&self) -> NonZeroU32 {
         self.inodes_per_block_group
     }
 
@@ -299,7 +301,8 @@ impl Superblock {
         self.block_group_descriptor_size
     }
 
-    pub(crate) fn num_block_groups(&self) -> u32 {
+    /// Number of block groups in this filesystem
+    pub fn num_block_groups(&self) -> u32 {
         self.num_block_groups
     }
 

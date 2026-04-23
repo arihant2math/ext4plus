@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Expose `Superblock::num_block_groups`, `Superblock::inodes_per_block_group`, and `Superblock::write`
+
 ## 0.1.0-beta.2
 
 - Add `multi-threading` feature flag so that thread safety can be opted out for single-threaded environments.
