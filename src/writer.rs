@@ -177,3 +177,77 @@ where
         (**self).write(start_byte, src)
     }
 }
+
+#[cfg(all(
+    feature = "std",
+    not(feature = "multi-threaded"),
+    not(feature = "sync"),
+    target_family = "unix"
+))]
+#[async_trait(?Send)]
+impl Ext4Write for std::fs::File {
+    async fn write(
+        &self,
+        start_byte: u64,
+        src: &[u8],
+    ) -> Result<(), BoxedError> {
+        use std::os::unix::fs::FileExt;
+
+        let total = self.write_at(src, start_byte).map_err(Box::new)?;
+        if total != src.len() {
+            return Err(Box::new(crate::MemIoError {
+                start: start_byte,
+                read_len: src.len(),
+                src_len: total,
+            })
+            .into());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(
+    feature = "std",
+    feature = "multi-threaded",
+    not(feature = "sync"),
+    target_family = "unix"
+))]
+#[async_trait]
+impl Ext4Write for std::fs::File {
+    async fn write(
+        &self,
+        start_byte: u64,
+        src: &[u8],
+    ) -> Result<(), BoxedError> {
+        use std::os::unix::fs::FileExt;
+
+        let total = self.write_at(src, start_byte).map_err(Box::new)?;
+        if total != src.len() {
+            return Err(Box::new(crate::MemIoError {
+                start: start_byte,
+                read_len: src.len(),
+                src_len: total,
+            })
+            .into());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "std", feature = "sync", target_family = "unix"))]
+impl Ext4Write for std::fs::File {
+    fn write(&self, start_byte: u64, src: &[u8]) -> Result<(), BoxedError> {
+        use std::os::unix::fs::FileExt;
+
+        let total = self.write_at(src, start_byte).map_err(Box::new)?;
+        if total != src.len() {
+            return Err(Box::new(crate::MemIoError {
+                start: start_byte,
+                read_len: src.len(),
+                src_len: total,
+            })
+            .into());
+        }
+        Ok(())
+    }
+}

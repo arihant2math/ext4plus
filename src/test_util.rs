@@ -141,7 +141,6 @@ impl Ext4Write for MemRw {
     }
 }
 
-
 #[cfg(feature = "sync")]
 impl Ext4Write for MemRw {
     fn write(

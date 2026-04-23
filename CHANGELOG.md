@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- ADDED: `Ext4::load_with_writer` to allow loading files with write-back.
+
 ## 0.1.0-beta.3
 
 - Expose `Superblock::num_block_groups`, `Superblock::inodes_per_block_group`, and `Superblock::write`.

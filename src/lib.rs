@@ -268,6 +268,19 @@ impl Ext4 {
         Self::load(Box::new(file)).await
     }
 
+    #[cfg(all(feature = "std", target_family = "unix"))]
+    /// Load an [`Ext4`] instance from a file at the given path.
+    #[maybe_async::maybe_async]
+    pub async fn load_from_path_rw<P: AsRef<std::path::Path>>(
+        path: P,
+    ) -> Result<Self, Ext4Error> {
+        let file = std::fs::File::open(path)
+            .map_err(|err| Ext4Error::Io(Box::new(err)))?;
+        let file = PtrPrimitive::new(file);
+        Self::load_with_writer(Box::new(file.clone()), Some(Box::new(file)))
+            .await
+    }
+
     /// Get the filesystem label.
     #[must_use]
     pub fn label(&self) -> &Label {
