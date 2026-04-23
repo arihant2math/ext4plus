@@ -658,7 +658,7 @@ impl Dir {
     ///
     /// An error will be returned if:
     /// * The entry does not exist [`Ext4Error::NotFound`]
-    /// * The entry is "." or ".." [`Ext4Erro::DotEntry`]
+    /// * The entry is "." or ".." [`Ext4Error::DotEntry`]
     /// * The file blocks of the inode are corrupted in some way
     #[maybe_async::maybe_async]
     pub async fn unlink(
