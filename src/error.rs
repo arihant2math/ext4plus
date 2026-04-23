@@ -311,6 +311,12 @@ pub(crate) enum CorruptKind {
     /// tag.
     JournalDescriptorBlockTruncated,
 
+    /// MMP magic is invalid.
+    MmpMagic,
+
+    /// MMP checksum is invalid.
+    MmpChecksum,
+
     /// An inode's checksum is invalid.
     InodeChecksum(InodeIndex),
 
@@ -510,6 +516,8 @@ impl Display for CorruptKind {
             Self::JournalDescriptorBlockTruncated => {
                 write!(f, "journal descriptor block is truncated")
             }
+            Self::MmpMagic => write!(f, "MMP magic is invalid"),
+            Self::MmpChecksum => write!(f, "MMP checksum is invalid"),
             Self::InodeChecksum(inode) => {
                 write!(f, "invalid checksum for inode {inode}")
             }

@@ -129,6 +129,7 @@ mod journal;
 mod label;
 mod mem_io_error;
 mod metadata;
+mod mmp;
 pub mod path;
 pub mod prelude;
 mod reader;
@@ -164,6 +165,7 @@ use inode::{
 };
 use iters::file_blocks::FileBlocks;
 use journal::Journal;
+use mmp::Mmp;
 use path::{Path, PathBuf};
 use superblock::Superblock;
 use sync::PtrPrimitive;
@@ -1146,6 +1148,26 @@ impl Ext4 {
         let path = path.try_into().map_err(|_| Ext4Error::MalformedPath)?;
         let mut inode = self.path_to_inode(path, FollowSymlinks::All).await?;
         inode.remove_xattr(self, name).await
+    }
+
+    #[expect(unused)]
+    /// Returns mmp object if available
+    #[maybe_async::maybe_async]
+    pub(crate) async fn mmp(&self) -> Result<Option<Mmp>, Ext4Error> {
+        if !self
+            .0
+            .superblock
+            .incompatible_features()
+            .contains(IncompatibleFeatures::MULTIPLE_MOUNT_PROTECTION)
+        {
+            return Ok(None);
+        }
+        let mmp_block = self.0.superblock.mmp_block();
+        if mmp_block == 0 {
+            return Ok(None);
+        }
+        let block_data = self.read_block(mmp_block).await?;
+        Ok(Some(Mmp::from_bytes(self, &block_data)?))
     }
 }
 

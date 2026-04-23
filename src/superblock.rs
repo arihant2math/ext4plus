@@ -7,6 +7,7 @@
 // except according to those terms.
 //! Superblock structure and related functionality.
 
+use crate::block_index::FsBlockIndex;
 use crate::block_size::BlockSize;
 use crate::checksum::Checksum;
 use crate::error::{CorruptKind, Ext4Error, IncompatibleKind};
@@ -16,7 +17,7 @@ use crate::features::{
 };
 use crate::inode::InodeIndex;
 use crate::util::{
-    read_u16le, read_u32le, u64_from_hilo, u64_to_hilo, write_u32le,
+    read_u16le, read_u32le, read_u64le, u64_from_hilo, u64_to_hilo, write_u32le,
 };
 use crate::{Ext4, Label, Uuid};
 use core::fmt::Display;
@@ -453,6 +454,11 @@ impl Superblock {
         let creator_os = read_u32le(&self.data, 0x48);
         CreatorOS(creator_os)
     }
+
+    /// Get MMP block
+    pub fn mmp_block(&self) -> FsBlockIndex {
+        read_u64le(&self.data, 0x168)
+    }
 }
 
 fn check_incompat_features(
@@ -473,7 +479,6 @@ fn check_incompat_features(
     let disallowed_features = IncompatibleFeatures::COMPRESSION
         | IncompatibleFeatures::SEPARATE_JOURNAL_DEVICE
         | IncompatibleFeatures::META_BLOCK_GROUPS
-        | IncompatibleFeatures::MULTIPLE_MOUNT_PROTECTION
         | IncompatibleFeatures::LARGE_EXTENDED_ATTRIBUTES_IN_INODES
         | IncompatibleFeatures::DATA_IN_DIR_ENTRY
         | IncompatibleFeatures::LARGE_DIRECTORIES

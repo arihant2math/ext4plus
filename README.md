@@ -43,8 +43,8 @@ incompatible:
 ------------
 
 * filetype: **required**
-* recover, extents, 64bit, bg_meta_csum, flex_bg: **yes**
-* compression, journal_dev, meta_bg, mmp, ea_inode, dirdata, largedir, inline_data: **no**
+* recover, extents, 64bit, bg_meta_csum, flex_bg, mmp: **yes**
+* compression, journal_dev, meta_bg, ea_inode, dirdata, largedir, inline_data: **no**
 
 compatible:
 ------------
