@@ -73,14 +73,49 @@ bitflags! {
         const VERITY = 0x8000;
         const ORPHAN_PRESENT = 0x1_0000;
     }
-}
 
-bitflags! {
     /// Optional file system features.
     #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
     pub struct CompatibleFeatures: u32 {
         const HAS_JOURNAL = 0x4;
         const EXT_ATTR = 0x8;
+        const RESIZE_INODE = 0x10;
         const DIR_INDEX = 0x20;
+    }
+}
+
+/// Filesystem feature
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum FilesystemFeature {
+    Incompatible(IncompatibleFeatures),
+    ReadOnlyCompatible(ReadOnlyCompatibleFeatures),
+    Compatible(CompatibleFeatures),
+}
+
+/// Filesystem features
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct FilesystemFeatures {
+    /// Incompatible features
+    pub(crate) incompatible: IncompatibleFeatures,
+    /// RO compatible features
+    pub(crate) read_only_compatible: ReadOnlyCompatibleFeatures,
+    /// Compatible features
+    pub(crate) compatible: CompatibleFeatures,
+}
+
+impl FilesystemFeatures {
+    /// Incompatible features
+    pub fn incompatible(&self) -> IncompatibleFeatures {
+        self.incompatible
+    }
+
+    /// RO compatible features
+    pub fn read_only_compatible(&self) -> ReadOnlyCompatibleFeatures {
+        self.read_only_compatible
+    }
+
+    /// Compatible features
+    pub fn compatible(&self) -> CompatibleFeatures {
+        self.compatible
     }
 }

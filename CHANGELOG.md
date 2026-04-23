@@ -2,7 +2,9 @@
 
 ## [Unreleased]
 
-- Expose `Superblock::num_block_groups`, `Superblock::inodes_per_block_group`, and `Superblock::write`
+- Expose `Superblock::num_block_groups`, `Superblock::inodes_per_block_group`, and `Superblock::write`.
+- Ensure proper xattr feature exists in filesystem before allowing xattr operations.
+- Add `FilesystemFeatures` struct to get a more detailed view of the features of the filesystem, exposes struct via `Superblock::features`.
 
 ## 0.1.0-beta.2
 

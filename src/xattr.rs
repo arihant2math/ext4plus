@@ -9,6 +9,7 @@
 
 use crate::Ext4;
 use crate::error::{CorruptKind, Ext4Error};
+use crate::features::{CompatibleFeatures, FilesystemFeature};
 use crate::inode::Inode;
 use crate::util::{read_u16le, read_u32le, write_u16le, write_u32le};
 use alloc::vec;
@@ -287,6 +288,16 @@ impl Inode {
         &self,
         ext4: &Ext4,
     ) -> Result<Vec<XattrEntry>, Ext4Error> {
+        if !ext4
+            .0
+            .superblock
+            .compatible_features()
+            .contains(CompatibleFeatures::EXT_ATTR)
+        {
+            return Err(Ext4Error::UnsupportedOperation(
+                FilesystemFeature::Compatible(CompatibleFeatures::EXT_ATTR),
+            ));
+        }
         let mut entries = Vec::new();
 
         let ibody_start = xattr_body_start(self);
@@ -347,6 +358,16 @@ impl Inode {
         &self,
         ext4: &Ext4,
     ) -> Result<Vec<Vec<u8>>, Ext4Error> {
+        if !ext4
+            .0
+            .superblock
+            .compatible_features()
+            .contains(CompatibleFeatures::EXT_ATTR)
+        {
+            return Err(Ext4Error::UnsupportedOperation(
+                FilesystemFeature::Compatible(CompatibleFeatures::EXT_ATTR),
+            ));
+        }
         let entries = self.read_xattrs(ext4).await?;
         entries
             .into_iter()
@@ -364,6 +385,16 @@ impl Inode {
     where
         N: AsRef<[u8]>,
     {
+        if !ext4
+            .0
+            .superblock
+            .compatible_features()
+            .contains(CompatibleFeatures::EXT_ATTR)
+        {
+            return Err(Ext4Error::UnsupportedOperation(
+                FilesystemFeature::Compatible(CompatibleFeatures::EXT_ATTR),
+            ));
+        }
         let (name_index, name) = parse_xattr_name(name.as_ref())?;
         let entries = self.read_xattrs(ext4).await?;
         Ok(entries
@@ -393,6 +424,16 @@ impl Inode {
         N: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
+        if !ext4
+            .0
+            .superblock
+            .compatible_features()
+            .contains(CompatibleFeatures::EXT_ATTR)
+        {
+            return Err(Ext4Error::UnsupportedOperation(
+                FilesystemFeature::Compatible(CompatibleFeatures::EXT_ATTR),
+            ));
+        }
         let (name_index, name) = parse_xattr_name(name.as_ref())?;
         let value = value.as_ref().to_vec();
         let mut entries = self.read_xattrs(ext4).await?;
@@ -445,6 +486,16 @@ impl Inode {
     where
         N: AsRef<[u8]>,
     {
+        if !ext4
+            .0
+            .superblock
+            .compatible_features()
+            .contains(CompatibleFeatures::EXT_ATTR)
+        {
+            return Err(Ext4Error::UnsupportedOperation(
+                FilesystemFeature::Compatible(CompatibleFeatures::EXT_ATTR),
+            ));
+        }
         let (name_index, name) = parse_xattr_name(name.as_ref())?;
         let mut entries = self.read_xattrs(ext4).await?;
         let original_len = entries.len();

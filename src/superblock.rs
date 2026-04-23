@@ -11,7 +11,8 @@ use crate::block_size::BlockSize;
 use crate::checksum::Checksum;
 use crate::error::{CorruptKind, Ext4Error, IncompatibleKind};
 use crate::features::{
-    CompatibleFeatures, IncompatibleFeatures, ReadOnlyCompatibleFeatures,
+    CompatibleFeatures, FilesystemFeatures, IncompatibleFeatures,
+    ReadOnlyCompatibleFeatures,
 };
 use crate::inode::InodeIndex;
 use crate::util::{
@@ -33,8 +34,7 @@ pub struct Superblock {
     inodes_per_block_group: NonZeroU32,
     block_group_descriptor_size: u16,
     num_block_groups: u32,
-    incompatible_features: IncompatibleFeatures,
-    read_only_compatible_features: ReadOnlyCompatibleFeatures,
+    features: FilesystemFeatures,
     min_extra_isize: u16,
     checksum_seed: u32,
     htree_hash_seed: [u32; 4],
@@ -55,9 +55,7 @@ impl PartialEq for Superblock {
             && self.block_group_descriptor_size
                 == other.block_group_descriptor_size
             && self.num_block_groups == other.num_block_groups
-            && self.incompatible_features == other.incompatible_features
-            && self.read_only_compatible_features
-                == other.read_only_compatible_features
+            && self.features == other.features
             && self.min_extra_isize == other.min_extra_isize
             && self.checksum_seed == other.checksum_seed
             && self.htree_hash_seed == other.htree_hash_seed
@@ -218,8 +216,11 @@ impl Superblock {
             inodes_per_block_group,
             block_group_descriptor_size,
             num_block_groups,
-            incompatible_features,
-            read_only_compatible_features,
+            features: FilesystemFeatures {
+                compatible: compatible_features,
+                incompatible: incompatible_features,
+                read_only_compatible: read_only_compatible_features,
+            },
             min_extra_isize: s_min_extra_isize,
             checksum_seed,
             htree_hash_seed: s_hash_seed,
@@ -231,10 +232,10 @@ impl Superblock {
     }
 
     pub(crate) fn read_only(&self) -> bool {
-        self.incompatible_features
+        self.incompatible_features()
             .contains(IncompatibleFeatures::RECOVERY)
             || !check_read_only_compat_features(
-                self.read_only_compatible_features.bits(),
+                self.read_only_compatible_features().bits(),
             )
     }
 
@@ -252,7 +253,7 @@ impl Superblock {
         write_u32le(&mut data, 0x158, free_blocks_hi);
 
         if self
-            .read_only_compatible_features
+            .read_only_compatible_features()
             .contains(ReadOnlyCompatibleFeatures::METADATA_CHECKSUMS)
         {
             let mut checksum = Checksum::new();
@@ -306,14 +307,26 @@ impl Superblock {
         self.num_block_groups
     }
 
-    pub(crate) fn incompatible_features(&self) -> IncompatibleFeatures {
-        self.incompatible_features
+    /// FS features
+    pub fn features(&self) -> FilesystemFeatures {
+        self.features
     }
 
+    /// FS compat features
+    pub(crate) fn compatible_features(&self) -> CompatibleFeatures {
+        self.features.compatible()
+    }
+
+    /// FS incompat features
+    pub(crate) fn incompatible_features(&self) -> IncompatibleFeatures {
+        self.features.incompatible()
+    }
+
+    /// FS ro-compat features
     pub(crate) fn read_only_compatible_features(
         &self,
     ) -> ReadOnlyCompatibleFeatures {
-        self.read_only_compatible_features
+        self.features.read_only_compatible()
     }
 
     pub(crate) fn min_extra_isize(&self) -> u16 {
@@ -455,19 +468,23 @@ mod tests {
                 inodes_per_block_group: NonZero::new(16).unwrap(),
                 block_group_descriptor_size: 64,
                 num_block_groups: 1,
-                incompatible_features:
-                    IncompatibleFeatures::FILE_TYPE_IN_DIR_ENTRY
+                features: FilesystemFeatures {
+                    incompatible: IncompatibleFeatures::FILE_TYPE_IN_DIR_ENTRY
                         | IncompatibleFeatures::EXTENTS
                         | IncompatibleFeatures::IS_64BIT
                         | IncompatibleFeatures::FLEXIBLE_BLOCK_GROUPS
                         | IncompatibleFeatures::CHECKSUM_SEED_IN_SUPERBLOCK,
-                read_only_compatible_features:
-                    ReadOnlyCompatibleFeatures::SPARSE_SUPERBLOCKS
-                        | ReadOnlyCompatibleFeatures::LARGE_FILES
-                        | ReadOnlyCompatibleFeatures::HUGE_FILES
-                        | ReadOnlyCompatibleFeatures::LARGE_DIRECTORIES
-                        | ReadOnlyCompatibleFeatures::LARGE_INODES
-                        | ReadOnlyCompatibleFeatures::METADATA_CHECKSUMS,
+                    read_only_compatible:
+                        ReadOnlyCompatibleFeatures::SPARSE_SUPERBLOCKS
+                            | ReadOnlyCompatibleFeatures::LARGE_FILES
+                            | ReadOnlyCompatibleFeatures::HUGE_FILES
+                            | ReadOnlyCompatibleFeatures::LARGE_DIRECTORIES
+                            | ReadOnlyCompatibleFeatures::LARGE_INODES
+                            | ReadOnlyCompatibleFeatures::METADATA_CHECKSUMS,
+                    compatible: CompatibleFeatures::EXT_ATTR
+                        | CompatibleFeatures::RESIZE_INODE
+                        | CompatibleFeatures::DIR_INDEX
+                },
                 min_extra_isize: 32,
                 checksum_seed: 0xfd3cc0be,
                 htree_hash_seed: [

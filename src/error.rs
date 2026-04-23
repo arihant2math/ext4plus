@@ -10,7 +10,7 @@
 use crate::block_index::FsBlockIndex;
 use crate::block_size::BlockSize;
 use crate::dir_entry::DirEntryNameError;
-use crate::features::IncompatibleFeatures;
+use crate::features::{FilesystemFeature, IncompatibleFeatures};
 use crate::inode::{InodeIndex, InodeMode};
 use alloc::boxed::Box;
 use core::error::Error;
@@ -87,6 +87,9 @@ pub enum Ext4Error {
         BoxedError,
     ),
 
+    /// The operation is not supported by the filesystem
+    UnsupportedOperation(FilesystemFeature),
+
     /// The filesystem is not supported by this library. This does not
     /// indicate a problem with the filesystem, or with the calling
     /// code. Please file a feature request and include the incompatible
@@ -146,6 +149,9 @@ impl Display for Ext4Error {
             // TODO: if the `Error` trait ever makes it into core, stop
             // printing `err` here and return it via `Error::source` instead.
             Self::Io(err) => write!(f, "io error: {err}"),
+            Self::UnsupportedOperation(feat) => {
+                write!(f, "unsupported operation due to {feat:?}")
+            }
             Self::Incompatible(i) => write!(f, "incompatible filesystem: {i}"),
             Self::Corrupt(c) => write!(f, "corrupt filesystem: {c}"),
             Self::Readonly => write!(f, "filesystem is read-only"),
@@ -175,6 +181,7 @@ impl From<Ext4Error> for std::io::Error {
 
             Ext4Error::Corrupt(_)
             | Ext4Error::Incompatible(_)
+            | Ext4Error::UnsupportedOperation(_)
             | Ext4Error::PathTooLong
             | Ext4Error::TooManySymlinks
             | Ext4Error::DotEntry => Self::other(e),
