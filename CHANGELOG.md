@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - Expose `Superblock::num_block_groups`, `Superblock::inodes_per_block_group`, and `Superblock::write`.
+- Add `Superblock::mount_time` and `Superblock::mkfs_time`.
 - Ensure proper xattr feature exists in filesystem before allowing xattr operations.
 - Add `FilesystemFeatures` struct to get a more detailed view of the features of the filesystem, exposes struct via `Superblock::features`.
 

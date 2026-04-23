@@ -21,6 +21,7 @@ use crate::util::{
 use crate::{Ext4, Label, Uuid};
 use core::num::NonZeroU32;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::time::Duration;
 
 /// Information about the filesystem.
 #[derive(Debug)]
@@ -385,6 +386,40 @@ impl Superblock {
 
     pub(crate) fn dec_free_blocks_count(&self, amount: u64) {
         self.free_blocks_count.fetch_sub(amount, Ordering::Relaxed);
+    }
+
+    /// Mount times in seconds from epoch
+    pub fn mount_time(&self) -> Duration {
+        let m_time = read_u32le(&self.data, 0x2C);
+        let m_time_high = if self
+            .incompatible_features()
+            .contains(IncompatibleFeatures::IS_64BIT)
+        {
+            self.data[0x275]
+        } else {
+            0
+        };
+        let mtime = u64::from(m_time)
+            .checked_add(u64::from(m_time_high) << 32)
+            .unwrap();
+        Duration::from_secs(mtime)
+    }
+
+    /// MKFS time, in seconds from epoch
+    pub fn mkfs_time(&self) -> Duration {
+        let m_time = read_u32le(&self.data, 0x108);
+        let m_time_high = if self
+            .incompatible_features()
+            .contains(IncompatibleFeatures::IS_64BIT)
+        {
+            self.data[0x276]
+        } else {
+            0
+        };
+        let mtime = u64::from(m_time)
+            .checked_add(u64::from(m_time_high) << 32)
+            .unwrap();
+        Duration::from_secs(mtime)
     }
 }
 
