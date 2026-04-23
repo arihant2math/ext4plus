@@ -1449,48 +1449,179 @@ mod tests {
         (tree, leaf0_block, leaf1_block)
     }
 
-    #[maybe_async::test(
-        feature = "sync",
-        async(not(feature = "sync"), tokio::test)
-    )]
-    #[ignore]
-    async fn test_extent_tree_internal_nodes_find_extent_and_get_block() {
-        let fs = load_test_disk1_rw().await;
-        let ext4 = fs.0.clone();
-        let inode = root_inode_as_extent_tree(&fs).await;
+    /// Build a simple depth-2 extent tree written to disk.
+    ///
+    /// Layout:
+    /// - leaf0: contains one extent covering file blocks [0, 2)
+    /// - leaf1: contains one extent covering file blocks [10, 12)
+    /// - internal: contains two entries keyed at 0 and 10 pointing to the leaf blocks.
+    /// - root: internal node with one entry keyed at 0 pointing to the internal block.
+    #[maybe_async::maybe_async]
+    async fn build_depth2_tree(
+        ext4: &Ext4,
+        inode: &Inode,
+    ) -> (ExtentTree, FsBlockIndex, FsBlockIndex) {
+        use crate::extent::Extent;
 
-        let (tree, _leaf0, _leaf1) = build_depth1_tree(&ext4, &inode).await;
+        let checksum_base = inode.checksum_base().clone();
+        let checksum_base_opt =
+            ext4.has_metadata_checksums().then(|| checksum_base.clone());
 
-        // Within leaf0 extent.
-        let e0 = tree.find_extent(0).await.unwrap().unwrap();
-        assert_eq!(e0.block_within_file, 0);
-        let block = tree.get_block(0).await.unwrap();
-        assert_eq!(block, 100);
-        let block = tree.get_block(1).await.unwrap();
-        assert_eq!(block, 101);
-        let extent = tree.find_extent(2).await;
-        assert_eq!(extent.unwrap(), None);
+        // Allocate blocks for the 2 leaf nodes and 1 internal node.
+        let leaf0_block = ext4
+            .alloc_contiguous_blocks(inode.index, NonZeroU32::new(1).unwrap())
+            .await
+            .unwrap();
+        let leaf1_block = ext4
+            .alloc_contiguous_blocks(inode.index, NonZeroU32::new(1).unwrap())
+            .await
+            .unwrap();
+        let internal0_block = ext4
+            .alloc_contiguous_blocks(inode.index, NonZeroU32::new(1).unwrap())
+            .await
+            .unwrap();
 
-        // Hole before leaf1.
-        let extent = tree.find_extent(9).await.unwrap();
-        assert_eq!(extent, None);
+        // Construct leaf nodes.
+        let leaf0 = ExtentNode {
+            block: Some(leaf0_block),
+            header: NodeHeader {
+                num_entries: 1,
+                max_entries: 4,
+                depth: 0,
+                generation: 0,
+            },
+            entries: ExtentNodeEntries::Leaf(vec![Extent {
+                block_within_file: 0,
+                start_block: 100,
+                num_blocks: 2,
+                is_initialized: true,
+            }]),
+        };
+        let leaf1 = ExtentNode {
+            block: Some(leaf1_block),
+            header: NodeHeader {
+                num_entries: 1,
+                max_entries: 4,
+                depth: 0,
+                generation: 0,
+            },
+            entries: ExtentNodeEntries::Leaf(vec![Extent {
+                block_within_file: 10,
+                start_block: 200,
+                num_blocks: 2,
+                is_initialized: true,
+            }]),
+        };
 
-        // Within leaf1 extent.
-        let e1 = tree.find_extent(10).await.unwrap().unwrap();
-        assert_eq!(e1.block_within_file, 10);
-        let block = tree.get_block(10).await.unwrap();
-        assert_eq!(block, 200);
-        let block = tree.get_block(11).await.unwrap();
-        assert_eq!(block, 201);
-        let extent = tree.find_extent(12).await.unwrap();
-        assert_eq!(extent, None);
+        let internal0 = ExtentNode {
+            block: Some(internal0_block),
+            header: NodeHeader {
+                num_entries: 2,
+                max_entries: 4,
+                depth: 1,
+                generation: 1,
+            },
+            entries: ExtentNodeEntries::Internal(vec![
+                ExtentInternalNode {
+                    block_within_file: 0,
+                    block: leaf0_block,
+                },
+                ExtentInternalNode {
+                    block_within_file: 10,
+                    block: leaf1_block,
+                },
+            ]),
+        };
+
+        ext4.write_to_block(
+            leaf0_block,
+            0,
+            &leaf0.to_bytes(checksum_base_opt.clone()).unwrap(),
+        )
+            .await
+            .unwrap();
+        ext4.write_to_block(
+            leaf1_block,
+            0,
+            &leaf1.to_bytes(checksum_base_opt.clone()).unwrap(),
+        )
+            .await
+            .unwrap();
+        ext4.write_to_block(
+            internal0_block,
+            0,
+            &internal0.to_bytes(checksum_base_opt.clone()).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        // Construct an internal root node that points to the two leaf blocks.
+        let root = ExtentNode {
+            block: None,
+            header: NodeHeader {
+                num_entries: 1,
+                max_entries: 4,
+                depth: 2,
+                generation: 0,
+            },
+            entries: ExtentNodeEntries::Internal(vec![
+                ExtentInternalNode {
+                    block_within_file: 0,
+                    block: internal0_block,
+                }
+            ]),
+        };
+
+        let tree = ExtentTree {
+            ext4: ext4.clone(),
+            inode: inode.index,
+            node: root,
+            checksum_base,
+        };
+
+        (tree, leaf0_block, leaf1_block)
     }
 
     #[maybe_async::test(
         feature = "sync",
         async(not(feature = "sync"), tokio::test)
     )]
-    #[ignore]
+    async fn test_extent_tree_internal_nodes_find_extent_and_get_block() {
+        let fs = load_test_disk1_rw().await;
+        let ext4 = fs.0.clone();
+        let inode = root_inode_as_extent_tree(&fs).await;
+
+        for (tree, _leaf0, _leaf1) in [build_depth1_tree(&ext4, &inode).await, build_depth2_tree(&ext4, &inode).await] {
+            // Within leaf0 extent.
+            let e0 = tree.find_extent(0).await.unwrap().unwrap();
+            assert_eq!(e0.block_within_file, 0);
+            let block = tree.get_block(0).await.unwrap();
+            assert_eq!(block, 100);
+            let block = tree.get_block(1).await.unwrap();
+            assert_eq!(block, 101);
+            let extent = tree.find_extent(2).await;
+            assert_eq!(extent.unwrap(), None);
+
+            // Hole before leaf1.
+            let extent = tree.find_extent(9).await.unwrap();
+            assert_eq!(extent, None);
+
+            // Within leaf1 extent.
+            let e1 = tree.find_extent(10).await.unwrap().unwrap();
+            assert_eq!(e1.block_within_file, 10);
+            let block = tree.get_block(10).await.unwrap();
+            assert_eq!(block, 200);
+            let block = tree.get_block(11).await.unwrap();
+            assert_eq!(block, 201);
+            let extent = tree.find_extent(12).await.unwrap();
+            assert_eq!(extent, None);
+        }
+    }
+
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
     async fn test_extent_tree_internal_nodes_selection_boundary_conditions() {
         let fs = load_test_disk1_rw().await;
         let ext4 = fs.0.clone();
