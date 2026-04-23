@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## 0.1.0-beta.3
+
 - Expose `Superblock::num_block_groups`, `Superblock::inodes_per_block_group`, and `Superblock::write`.
 - Add `Superblock::creator_os`, `Superblock::mount_time`, and `Superblock::mkfs_time`.
 - Ensure proper xattr feature exists in filesystem before allowing xattr operations.
