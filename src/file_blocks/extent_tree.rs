@@ -1538,15 +1538,15 @@ mod tests {
             0,
             &leaf0.to_bytes(checksum_base_opt.clone()).unwrap(),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         ext4.write_to_block(
             leaf1_block,
             0,
             &leaf1.to_bytes(checksum_base_opt.clone()).unwrap(),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         ext4.write_to_block(
             internal0_block,
             0,
@@ -1564,12 +1564,10 @@ mod tests {
                 depth: 2,
                 generation: 0,
             },
-            entries: ExtentNodeEntries::Internal(vec![
-                ExtentInternalNode {
-                    block_within_file: 0,
-                    block: internal0_block,
-                }
-            ]),
+            entries: ExtentNodeEntries::Internal(vec![ExtentInternalNode {
+                block_within_file: 0,
+                block: internal0_block,
+            }]),
         };
 
         let tree = ExtentTree {
@@ -1591,7 +1589,10 @@ mod tests {
         let ext4 = fs.0.clone();
         let inode = root_inode_as_extent_tree(&fs).await;
 
-        for (tree, _leaf0, _leaf1) in [build_depth1_tree(&ext4, &inode).await, build_depth2_tree(&ext4, &inode).await] {
+        for (tree, _leaf0, _leaf1) in [
+            build_depth1_tree(&ext4, &inode).await,
+            build_depth2_tree(&ext4, &inode).await,
+        ] {
             // Within leaf0 extent.
             let e0 = tree.find_extent(0).await.unwrap().unwrap();
             assert_eq!(e0.block_within_file, 0);
