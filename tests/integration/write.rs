@@ -852,7 +852,9 @@ async fn multi_op_test() {
             .await
             .unwrap();
         let mut one_file = File::open_inode(&fs, one_inode).unwrap();
-        assert_eq!(one_file.write_bytes(b"Hello, world!").await.unwrap(), 13);
+        let bytes_written =
+            one_file.write_bytes(b"Hello, world!").await.unwrap();
+        assert_eq!(bytes_written, 13);
 
         let test_dir_inode = fs
             .create_inode(InodeCreationOptions {
@@ -946,14 +948,16 @@ async fn multi_op_test() {
         }
         assert_eq!(test_two_written, test_two_data.len());
 
-        assert_eq!(one_file.write_bytes(b" Bye, world!").await.unwrap(), 12);
+        let bytes_written =
+            one_file.write_bytes(b" Bye, world!").await.unwrap();
+        assert_eq!(bytes_written, 12);
 
-        assert_eq!(
-            fs.read("/one.txt").await.unwrap(),
-            b"Hello, world! Bye, world!"
-        );
-        assert_eq!(fs.read("/test/one.txt").await.unwrap(), test_one_data);
-        assert_eq!(fs.read("/test/two.txt").await.unwrap(), test_two_data);
+        let data = fs.read("/one.txt").await.unwrap();
+        assert_eq!(data, b"Hello, world! Bye, world!");
+        let data = fs.read("/test/one.txt").await.unwrap();
+        assert_eq!(data, test_one_data);
+        let data = fs.read("/test/two.txt").await.unwrap();
+        assert_eq!(data, test_two_data);
 
         let test_dir_inode = fs
             .path_to_inode(Path::new("/test"), FollowSymlinks::All)
@@ -962,17 +966,15 @@ async fn multi_op_test() {
         assert_eq!(test_dir_inode.metadata().file_type, FileType::Directory);
 
         let test_dir = Dir::open_inode(&fs.0, test_dir_inode).unwrap();
-        assert!(
-            test_dir
-                .get_entry(DirEntryName::try_from(b"one.txt").unwrap())
-                .await
-                .is_ok()
-        );
-        assert!(
-            test_dir
-                .get_entry(DirEntryName::try_from(b"two.txt").unwrap())
-                .await
-                .is_ok()
-        );
+        let is_ok = test_dir
+            .get_entry(DirEntryName::try_from(b"one.txt").unwrap())
+            .await
+            .is_ok();
+        assert!(is_ok);
+        let is_ok = test_dir
+            .get_entry(DirEntryName::try_from(b"two.txt").unwrap())
+            .await
+            .is_ok();
+        assert!(is_ok);
     }
 }

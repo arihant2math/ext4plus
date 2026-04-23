@@ -68,8 +68,8 @@ impl Journal {
 
 #[cfg(all(test, feature = "std"))]
 mod tests {
+    use crate::sync::PtrPrimitive;
     use crate::test_util::load_compressed_filesystem;
-    use std::sync::Arc;
 
     #[maybe_async::test(
         feature = "sync",
@@ -87,7 +87,11 @@ mod tests {
         assert!(exists);
 
         // Clear the journal, and verify that the directory no longer exists.
-        Arc::get_mut(&mut fs.0).unwrap().journal.block_map.clear();
+        PtrPrimitive::get_mut(&mut fs.0)
+            .unwrap()
+            .journal
+            .block_map
+            .clear();
         let exists = fs.exists(test_dir).await.unwrap();
         assert!(!exists);
     }
