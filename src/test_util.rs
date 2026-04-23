@@ -32,7 +32,29 @@ impl StdError for MemWriterError {}
 // Reader+Writer backed by a shared Arc<Mutex<Vec<u8>>> to verify persistence.
 pub(crate) struct MemRw(pub(crate) Arc<Mutex<Vec<u8>>>);
 
-#[cfg(not(feature = "sync"))]
+#[cfg(all(not(feature = "sync"), not(feature = "multi-threaded")))]
+#[async_trait(?Send)]
+impl Ext4Read for MemRw {
+    async fn read(
+        &self,
+        start_byte: u64,
+        dst: &mut [u8],
+    ) -> Result<(), Box<dyn StdError + Send + Sync + 'static>> {
+        let guard = self.0.lock().unwrap();
+        let start = start_byte as usize;
+        let end = start.checked_add(dst.len()).ok_or_else(|| {
+            Box::new(MemWriterError)
+                as Box<dyn StdError + Send + Sync + 'static>
+        })?;
+        if end > guard.len() {
+            return Err(Box::new(MemWriterError));
+        }
+        dst.copy_from_slice(&guard[start..end]);
+        Ok(())
+    }
+}
+
+#[cfg(all(not(feature = "sync"), feature = "multi-threaded"))]
 #[async_trait]
 impl Ext4Read for MemRw {
     async fn read(
@@ -75,7 +97,29 @@ impl Ext4Read for MemRw {
     }
 }
 
-#[cfg(not(feature = "sync"))]
+#[cfg(all(not(feature = "sync"), not(feature = "multi-threaded")))]
+#[async_trait(?Send)]
+impl Ext4Write for MemRw {
+    async fn write(
+        &self,
+        start_byte: u64,
+        src: &[u8],
+    ) -> Result<(), Box<dyn StdError + Send + Sync + 'static>> {
+        let mut guard = self.0.lock().unwrap();
+        let start = start_byte as usize;
+        let end = start.checked_add(src.len()).ok_or_else(|| {
+            Box::new(MemWriterError)
+                as Box<dyn StdError + Send + Sync + 'static>
+        })?;
+        if end > guard.len() {
+            return Err(Box::new(MemWriterError));
+        }
+        guard[start..end].copy_from_slice(src);
+        Ok(())
+    }
+}
+
+#[cfg(all(not(feature = "sync"), feature = "multi-threaded"))]
 #[async_trait]
 impl Ext4Write for MemRw {
     async fn write(
@@ -96,6 +140,7 @@ impl Ext4Write for MemRw {
         Ok(())
     }
 }
+
 
 #[cfg(feature = "sync")]
 impl Ext4Write for MemRw {
