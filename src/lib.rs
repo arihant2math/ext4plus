@@ -1025,6 +1025,9 @@ impl Ext4 {
     }
 
     /// Create a symbolic link at `path` pointing to `target`.
+    ///
+    /// # Errors
+    /// See [`Dir::link`]
     #[maybe_async::maybe_async]
     pub async fn symlink(
         &self,

@@ -59,12 +59,12 @@ pub(crate) async fn get_dir_entry_inode_by_name(
     Err(Ext4Error::NotFound)
 }
 
-/// Add an item to a directory without an htree.
+/// Add an item to a directory
 ///
 /// This edits directory entry bytes in-place and will error with
 /// [`Ext4Error::Readonly`] if it would require allocating a new block.
 #[maybe_async::maybe_async]
-pub(crate) async fn add_dir_entry_non_htree(
+pub(crate) async fn add_dir_entry(
     fs: &Ext4,
     dir_inode: &mut Inode,
     name: DirEntryName<'_>,
@@ -239,11 +239,11 @@ pub(crate) async fn add_dir_entry_non_htree(
     Ok(())
 }
 
-/// Remove an item from a directory without an htree.
+/// Remove an item from a directory
 ///
 /// This edits directory entry bytes in-place.
 #[maybe_async::maybe_async]
-pub(crate) async fn remove_dir_entry_non_htree(
+pub(crate) async fn remove_dir_entry(
     fs: &Ext4,
     dir_inode: &mut Inode,
     name: DirEntryName<'_>,
@@ -614,8 +614,12 @@ impl Dir {
     ///
     /// # Errors
     ///
-    /// An error will be returned if:
-    /// * The current directory is a htree
+    /// If links_count of the target is u16::MAX - 1, an error will be returned.
+    /// Likewise, an error will be returned if links_count of the parent is u16::MAX - 1,
+    /// and the target is a directory.
+    ///
+    /// [`Ext4Error::AlreadyExists`] will be returned if an entry with the same name is already present.
+    /// Encrypted directories cannot be read or modified.
     #[maybe_async::maybe_async]
     pub async fn link(
         &mut self,
@@ -635,7 +639,7 @@ impl Dir {
             self.inode.write(&self.fs).await?;
         }
 
-        add_dir_entry_non_htree(
+        add_dir_entry(
             &self.fs,
             &mut self.inode,
             name,
@@ -669,7 +673,7 @@ impl Dir {
         let old = inode.links_count();
         inode.set_links_count(old.saturating_sub(1));
         inode.write(&self.fs).await?;
-        remove_dir_entry_non_htree(&self.fs, &mut self.inode, name).await?;
+        remove_dir_entry(&self.fs, &mut self.inode, name).await?;
         if inode.links_count() == 0 {
             self.fs.delete_file(inode).await?;
             Ok(None)
