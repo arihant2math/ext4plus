@@ -607,10 +607,10 @@ impl Dir {
         get_dir_entry_inode_by_name(&self.fs, &self.inode, name).await
     }
 
-    /// Create a new directory entry at `path` pointing to `inode`.
+    /// Create a new directory entry at `name` pointing to `target_inode`.
+    /// Increments relevant link counts (`target_inode` always, and `self` if `target_inode` is a directory).
     ///
-    /// This is similar to `link(2)`. Currently only supports adding entries to
-    /// directories without an htree.
+    /// This is similar to `link(2)`.
     ///
     /// # Errors
     ///
@@ -652,15 +652,14 @@ impl Dir {
 
     /// Remove a directory entry at `path`.
     ///
-    /// This is similar to `unlink(2)` for non-directories. Currently only supports
-    /// removing entries from directories without an htree.
+    /// This is similar to `unlink(2)` for non-directories.
     ///
     /// # Errors
     ///
     /// An error will be returned if:
-    /// * The current directory is a htree (`Readonly`)
-    /// * The entry does not exist (`NotFound`)
-    /// * The entry is "." or ".." (`DotEntry`)
+    /// * The entry does not exist [`Ext4Error::NotFound`]
+    /// * The entry is "." or ".." [`Ext4Erro::DotEntry`]
+    /// * The file blocks of the inode are corrupted in some way
     #[maybe_async::maybe_async]
     pub async fn unlink(
         &mut self,

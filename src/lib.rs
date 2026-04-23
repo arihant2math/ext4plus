@@ -959,6 +959,10 @@ impl Ext4 {
         Ok(())
     }
 
+    /// Frees all blocks and deletes file.
+    ///
+    /// # Errors
+    /// If file blocks are corrupted in any way an error is returned.
     #[maybe_async::maybe_async]
     pub(crate) async fn delete_file(
         &self,
