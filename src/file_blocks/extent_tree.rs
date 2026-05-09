@@ -482,8 +482,9 @@ impl ExtentTree {
                 ExtentNodeEntries::Internal(internal_nodes) => {
                     let mut children = Vec::with_capacity(internal_nodes.len());
                     for internal_node in internal_nodes {
-                        children
-                            .push(self.read_extent_node(internal_node.block).await?);
+                        children.push(
+                            self.read_extent_node(internal_node.block).await?,
+                        );
                     }
                     while let Some(child) = children.pop() {
                         stack.push(child);
@@ -509,8 +510,9 @@ impl ExtentTree {
                     let mut children = Vec::with_capacity(internal_nodes.len());
                     for internal_node in internal_nodes {
                         out.push(internal_node.block);
-                        children
-                            .push(self.read_extent_node(internal_node.block).await?);
+                        children.push(
+                            self.read_extent_node(internal_node.block).await?,
+                        );
                     }
                     while let Some(child) = children.pop() {
                         stack.push(child);
@@ -552,7 +554,9 @@ impl ExtentTree {
         let mut nodes_at_level = total;
         while nodes_at_level > root_max {
             nodes_at_level = nodes_at_level.div_ceil(block_max);
-            total = total.checked_add(nodes_at_level).ok_or(Ext4Error::NoSpace)?;
+            total = total
+                .checked_add(nodes_at_level)
+                .ok_or(Ext4Error::NoSpace)?;
         }
         Ok(total)
     }
@@ -602,7 +606,10 @@ impl ExtentTree {
                 ExtentNode {
                     block: None,
                     header: NodeHeader {
-                        num_entries: checked_num_entries(extents.len(), self.inode)?,
+                        num_entries: checked_num_entries(
+                            extents.len(),
+                            self.inode,
+                        )?,
                         max_entries: root_max_entries,
                         depth: 0,
                         generation: 0,
@@ -630,7 +637,10 @@ impl ExtentTree {
             let node = ExtentNode {
                 block: Some(block),
                 header: NodeHeader {
-                    num_entries: checked_num_entries(chunk_vec.len(), self.inode)?,
+                    num_entries: checked_num_entries(
+                        chunk_vec.len(),
+                        self.inode,
+                    )?,
                     max_entries: block_max_entries,
                     depth: 0,
                     generation: 0,
@@ -654,7 +664,10 @@ impl ExtentTree {
                     ExtentNode {
                         block: None,
                         header: NodeHeader {
-                            num_entries: checked_num_entries(level.len(), self.inode)?,
+                            num_entries: checked_num_entries(
+                                level.len(),
+                                self.inode,
+                            )?,
                             max_entries: root_max_entries,
                             depth,
                             generation: 0,
@@ -662,9 +675,11 @@ impl ExtentTree {
                         entries: ExtentNodeEntries::Internal(
                             level
                                 .iter()
-                                .map(|(first_block, block, _depth)| ExtentInternalNode {
-                                    block_within_file: *first_block,
-                                    block: *block,
+                                .map(|(first_block, block, _depth)| {
+                                    ExtentInternalNode {
+                                        block_within_file: *first_block,
+                                        block: *block,
+                                    }
                                 })
                                 .collect(),
                         ),
@@ -694,7 +709,10 @@ impl ExtentTree {
                 let node = ExtentNode {
                     block: Some(block),
                     header: NodeHeader {
-                        num_entries: checked_num_entries(chunk.len(), self.inode)?,
+                        num_entries: checked_num_entries(
+                            chunk.len(),
+                            self.inode,
+                        )?,
                         max_entries: block_max_entries,
                         depth: node_depth,
                         generation: 0,
@@ -702,9 +720,11 @@ impl ExtentTree {
                     entries: ExtentNodeEntries::Internal(
                         chunk
                             .iter()
-                            .map(|(child_first_block, child_block, _depth)| ExtentInternalNode {
-                                block_within_file: *child_first_block,
-                                block: *child_block,
+                            .map(|(child_first_block, child_block, _depth)| {
+                                ExtentInternalNode {
+                                    block_within_file: *child_first_block,
+                                    block: *child_block,
+                                }
                             })
                             .collect(),
                     ),
@@ -724,7 +744,8 @@ impl ExtentTree {
         self.normalize_extents(&mut extents)?;
 
         let old_metadata_blocks = self.collect_metadata_blocks().await?;
-        let required_metadata_blocks = self.required_metadata_blocks(extents.len())?;
+        let required_metadata_blocks =
+            self.required_metadata_blocks(extents.len())?;
 
         let mut metadata_blocks = old_metadata_blocks.clone();
         while metadata_blocks.len() < required_metadata_blocks {
@@ -736,8 +757,10 @@ impl ExtentTree {
             &metadata_blocks[..required_metadata_blocks],
         )?;
 
-        let checksum_base =
-            self.ext4.has_metadata_checksums().then(|| self.checksum_base.clone());
+        let checksum_base = self
+            .ext4
+            .has_metadata_checksums()
+            .then(|| self.checksum_base.clone());
         for node in &written_nodes {
             node.write(&self.ext4, checksum_base.as_ref()).await?;
         }
@@ -1200,7 +1223,8 @@ impl ExtentTree {
     ) -> Result<(), Ext4Error> {
         let mut extents = self.collect_extents().await?;
         let mut rebuilt = Vec::with_capacity(
-            extents.len()
+            extents
+                .len()
                 .checked_add(1)
                 .ok_or(CorruptKind::ExtentNodeSize(self.inode))?,
         );
@@ -1267,7 +1291,8 @@ impl ExtentTree {
         let end = start.checked_add(num_blocks).ok_or(Ext4Error::NoSpace)?;
         let mut extents = self.collect_extents().await?;
         let mut rebuilt = Vec::with_capacity(
-            extents.len()
+            extents
+                .len()
                 .checked_mul(3)
                 .ok_or(CorruptKind::ExtentNodeSize(self.inode))?,
         );

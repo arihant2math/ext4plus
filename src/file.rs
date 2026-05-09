@@ -793,7 +793,8 @@ async fn write_at_extent(
                     Extent::allocate(inode.index, current_block, to_try, ext4)
                         .await?;
                 let tried_blocks = new_extent.num_blocks;
-                let metadata_before = extent_tree.metadata_block_count().await?;
+                let metadata_before =
+                    extent_tree.metadata_block_count().await?;
                 extent_tree.insert_extent(new_extent).await?;
                 let metadata_after = extent_tree.metadata_block_count().await?;
                 let metadata_delta = i64::from(metadata_after)
@@ -908,7 +909,8 @@ pub async fn truncate(
                         inode,
                         ext4.clone(),
                     )?;
-                let metadata_before = extent_tree.metadata_block_count().await?;
+                let metadata_before =
+                    extent_tree.metadata_block_count().await?;
                 let freed = extent_tree
                     .remove_extent_range(drop_from, drop_count)
                     .await?;

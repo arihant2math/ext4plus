@@ -994,11 +994,10 @@ impl Ext4 {
         let blocks = FileBlocks::new(self.clone(), &inode)?;
         blocks.free_all(self).await?;
         if inode.flags().contains(InodeFlags::EXTENTS) {
-            let extent_tree =
-                file_blocks::extent_tree::ExtentTree::from_inode(
-                    &inode,
-                    self.clone(),
-                )?;
+            let extent_tree = file_blocks::extent_tree::ExtentTree::from_inode(
+                &inode,
+                self.clone(),
+            )?;
             extent_tree.free_metadata_blocks().await?;
         }
         inode.set_size_in_bytes(0);
