@@ -100,6 +100,7 @@
     clippy::large_futures,
     clippy::must_use_candidate,
     clippy::rc_mutex,
+    clippy::unused_result_ok,
     clippy::use_self
 )]
 #![warn(missing_docs)]
