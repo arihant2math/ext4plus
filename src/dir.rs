@@ -59,6 +59,47 @@ pub(crate) async fn get_dir_entry_inode_by_name(
     Err(Ext4Error::NotFound)
 }
 
+#[inline]
+fn dir_entry_error(inode: InodeIndex) -> Ext4Error {
+    CorruptKind::DirEntry(inode).into()
+}
+
+#[inline]
+fn checked_add_usize(
+    lhs: usize,
+    rhs: usize,
+    inode: InodeIndex,
+) -> Result<usize, Ext4Error> {
+    lhs.checked_add(rhs).ok_or_else(|| dir_entry_error(inode))
+}
+
+#[inline]
+fn checked_sub_usize(
+    lhs: usize,
+    rhs: usize,
+    inode: InodeIndex,
+) -> Result<usize, Ext4Error> {
+    lhs.checked_sub(rhs).ok_or_else(|| dir_entry_error(inode))
+}
+
+#[inline]
+fn checked_add_u64(
+    lhs: u64,
+    rhs: u64,
+    inode: InodeIndex,
+) -> Result<u64, Ext4Error> {
+    lhs.checked_add(rhs).ok_or_else(|| dir_entry_error(inode))
+}
+
+#[inline]
+fn checked_mul_u64(
+    lhs: u64,
+    rhs: u64,
+    inode: InodeIndex,
+) -> Result<u64, Ext4Error> {
+    lhs.checked_mul(rhs).ok_or_else(|| dir_entry_error(inode))
+}
+
 /// Add an item to a directory
 ///
 /// This edits directory entry bytes in-place and will error with
@@ -92,7 +133,7 @@ pub(crate) async fn add_dir_entry(
     let block_size = fs.0.superblock.block_size().to_usize();
     let mut file_blocks = FileBlocks::new(fs.clone(), dir_inode)?;
 
-    let need = dir_entry_min_size(name.as_ref().len());
+    let need = dir_entry_min_size(name.as_ref().len(), dir_inode.index)?;
     let mut block_buf = vec![0u8; block_size];
     let mut is_first = true;
 
@@ -104,51 +145,59 @@ pub(crate) async fn add_dir_entry(
         let mut off = 0usize;
         while off < block_size {
             let inode_field = read_u32le(&block_buf, off);
-            let rec_len = read_u16le(&block_buf, off.checked_add(4).unwrap());
+            let rec_len_offset = checked_add_usize(off, 4, dir_inode.index)?;
+            let rec_len = read_u16le(&block_buf, rec_len_offset);
             let rec_len_usize = usize::from(rec_len);
+            let rec_end =
+                checked_add_usize(off, rec_len_usize, dir_inode.index)?;
 
-            if rec_len_usize < 8 || off.checked_add(rec_len_usize).is_none() {
-                return Err(CorruptKind::DirEntry(dir_inode.index).into());
-            }
-            if off.checked_add(rec_len_usize).unwrap() > block_size {
-                return Err(CorruptKind::DirEntry(dir_inode.index).into());
+            if rec_len_usize < 8 || rec_end > block_size {
+                return Err(dir_entry_error(dir_inode.index));
             }
 
             // `inode == 0` indicates "special" entry or unused; treat it as fully free.
             let used = if inode_field == 0 {
                 0usize
             } else {
-                let name_len =
-                    usize::from(block_buf[off.checked_add(6).unwrap()]);
-                dir_entry_min_size(name_len)
+                let name_len_offset =
+                    checked_add_usize(off, 6, dir_inode.index)?;
+                let name_len = usize::from(block_buf[name_len_offset]);
+                dir_entry_min_size(name_len, dir_inode.index)?
             };
 
-            if rec_len_usize >= used.checked_add(need).unwrap() {
+            let required = checked_add_usize(used, need, dir_inode.index)?;
+            if rec_len_usize >= required {
                 // Shrink current entry to its minimal size (or keep 0 if unused),
                 // and place the new entry in the leftover space.
                 let new_rec_len_for_curr =
                     if inode_field == 0 { 0usize } else { used };
-                let free_start = off.checked_add(new_rec_len_for_curr).unwrap();
-                let free_len =
-                    rec_len_usize.checked_sub(new_rec_len_for_curr).unwrap();
+                let free_start = checked_add_usize(
+                    off,
+                    new_rec_len_for_curr,
+                    dir_inode.index,
+                )?;
+                let free_len = checked_sub_usize(
+                    rec_len_usize,
+                    new_rec_len_for_curr,
+                    dir_inode.index,
+                )?;
 
                 if free_len < need {
                     // Shouldn't happen due to earlier check, but keep safe.
-                    off = off.checked_add(rec_len_usize).unwrap();
+                    off = rec_end;
                     continue;
                 }
 
-                let rec_len = if inode_field != 0 {
+                let rec_len_to_write = if inode_field != 0 {
                     new_rec_len_for_curr
                 } else {
                     rec_len_usize
                 };
                 write_u16le(
                     &mut block_buf,
-                    off.checked_add(4).unwrap(),
-                    u16::try_from(rec_len).map_err(|_| {
-                        Ext4Error::from(CorruptKind::DirEntry(dir_inode.index))
-                    })?,
+                    rec_len_offset,
+                    u16::try_from(rec_len_to_write)
+                        .map_err(|_| dir_entry_error(dir_inode.index))?,
                 );
 
                 // Write the new entry.
@@ -177,7 +226,7 @@ pub(crate) async fn add_dir_entry(
                 return Ok(());
             }
 
-            off = off.checked_add(rec_len_usize).unwrap();
+            off = rec_end;
         }
 
         is_first = false;
@@ -190,12 +239,10 @@ pub(crate) async fn add_dir_entry(
     } else {
         0usize
     };
-    let usable = block_size.checked_sub(tail_size).ok_or_else(|| {
-        Ext4Error::from(CorruptKind::DirEntry(dir_inode.index))
-    })?;
+    let usable = checked_sub_usize(block_size, tail_size, dir_inode.index)?;
 
     if need > usable {
-        return Err(CorruptKind::DirEntry(dir_inode.index).into());
+        return Err(dir_entry_error(dir_inode.index));
     }
 
     // New entry.
@@ -209,14 +256,13 @@ pub(crate) async fn add_dir_entry(
     )?;
 
     if fs.has_metadata_checksums() {
-        let checksum_start = block_size.checked_sub(12).unwrap();
+        let checksum_start =
+            checked_sub_usize(block_size, 12, dir_inode.index)?;
+        let checksum_tail_offset =
+            checked_add_usize(checksum_start, 4, dir_inode.index)?;
         write_u32le(&mut new_block_buf, checksum_start, 0);
         let tail_val = 12u32 | (0xDE << 24);
-        write_u32le(
-            &mut new_block_buf,
-            checksum_start.checked_add(4).unwrap(),
-            tail_val,
-        );
+        write_u32le(&mut new_block_buf, checksum_tail_offset, tail_val);
         DirBlock {
             fs,
             block_index: 0,
@@ -258,8 +304,9 @@ pub(crate) async fn remove_dir_entry(
     }
 
     let block_size = fs.0.superblock.block_size();
+    let block_size_usize = block_size.to_usize();
     let mut file_blocks = FileBlocks::new(fs.clone(), dir_inode)?;
-    let mut block_buf = vec![0u8; block_size.to_usize()];
+    let mut block_buf = vec![0u8; block_size_usize];
 
     let mut is_first = true;
     let mut logical_block_index = 0u64;
@@ -271,24 +318,27 @@ pub(crate) async fn remove_dir_entry(
         let mut off = 0usize;
         let mut prev_off: Option<usize> = None;
 
-        while off < block_size.to_usize() {
+        while off < block_size_usize {
             let inode_field = read_u32le(&block_buf, off);
-            let rec_len = read_u16le(&block_buf, off.checked_add(4).unwrap());
+            let rec_len_offset = checked_add_usize(off, 4, dir_inode.index)?;
+            let rec_len = read_u16le(&block_buf, rec_len_offset);
             let rec_len_usize = usize::from(rec_len);
+            let rec_end =
+                checked_add_usize(off, rec_len_usize, dir_inode.index)?;
 
-            if rec_len_usize < 8
-                || off.checked_add(rec_len_usize).unwrap() > block_size
-            {
-                return Err(CorruptKind::DirEntry(dir_inode.index).into());
+            if rec_len_usize < 8 || rec_end > block_size_usize {
+                return Err(dir_entry_error(dir_inode.index));
             }
 
             if inode_field != 0 {
-                let name_len =
-                    usize::from(block_buf[off.checked_add(6).unwrap()]);
-                let name_start = off.checked_add(8).unwrap();
-                let name_end = name_start.checked_add(name_len).unwrap();
-                if name_end > off.checked_add(rec_len_usize).unwrap() {
-                    return Err(CorruptKind::DirEntry(dir_inode.index).into());
+                let name_len_offset =
+                    checked_add_usize(off, 6, dir_inode.index)?;
+                let name_len = usize::from(block_buf[name_len_offset]);
+                let name_start = checked_add_usize(off, 8, dir_inode.index)?;
+                let name_end =
+                    checked_add_usize(name_start, name_len, dir_inode.index)?;
+                if name_end > rec_end {
+                    return Err(dir_entry_error(dir_inode.index));
                 }
 
                 if block_buf[name_start..name_end] == *name.as_ref() {
@@ -299,20 +349,20 @@ pub(crate) async fn remove_dir_entry(
 
                     if let Some(poff) = prev_off {
                         // Merge into previous record by extending its rec_len.
-                        let prev_rec_len = read_u16le(
-                            &block_buf,
-                            poff.checked_add(4).unwrap(),
-                        );
-                        let new_len = usize::from(prev_rec_len)
-                            .checked_add(rec_len_usize)
-                            .unwrap();
+                        let prev_rec_len_offset =
+                            checked_add_usize(poff, 4, dir_inode.index)?;
+                        let prev_rec_len =
+                            read_u16le(&block_buf, prev_rec_len_offset);
+                        let new_len = checked_add_usize(
+                            usize::from(prev_rec_len),
+                            rec_len_usize,
+                            dir_inode.index,
+                        )?;
                         write_u16le(
                             &mut block_buf,
-                            poff.checked_add(4).unwrap(),
+                            prev_rec_len_offset,
                             u16::try_from(new_len).map_err(|_| {
-                                Ext4Error::from(CorruptKind::DirEntry(
-                                    dir_inode.index,
-                                ))
+                                dir_entry_error(dir_inode.index)
                             })?,
                         );
                         // Zero inode to mark removed (not strictly necessary once merged).
@@ -322,15 +372,15 @@ pub(crate) async fn remove_dir_entry(
                         write_u32le(&mut block_buf, off, 0);
                     }
 
-                    // Check if this block is entirely empty
+                    // Check if this block is entirely empty.
                     let mut all_empty = true;
                     let mut verify_off = 0usize;
-                    while verify_off < block_size {
+                    while verify_off < block_size_usize {
                         let inode_field = read_u32le(&block_buf, verify_off);
-                        let rec_len = read_u16le(
-                            &block_buf,
-                            verify_off.checked_add(4).unwrap(),
-                        );
+                        let verify_rec_len_offset =
+                            checked_add_usize(verify_off, 4, dir_inode.index)?;
+                        let rec_len =
+                            read_u16le(&block_buf, verify_rec_len_offset);
                         let rec_len_usize = usize::from(rec_len);
                         if rec_len_usize == 0 {
                             break;
@@ -339,30 +389,32 @@ pub(crate) async fn remove_dir_entry(
                             all_empty = false;
                             break;
                         }
-                        verify_off =
-                            verify_off.checked_add(rec_len_usize).unwrap();
+                        verify_off = checked_add_usize(
+                            verify_off,
+                            rec_len_usize,
+                            dir_inode.index,
+                        )?;
                     }
 
-                    let file_blocks_count = (dir_inode
-                        .size_in_bytes()
-                        .checked_add(block_size.to_u64())
-                        .unwrap()
+                    let file_blocks_count =
+                        dir_inode.size_in_bytes().div_ceil(block_size.to_u64());
+                    let last_file_block_index = file_blocks_count
                         .checked_sub(1)
-                        .unwrap())
-                        / block_size.to_nz_u64();
+                        .ok_or_else(|| dir_entry_error(dir_inode.index))?;
 
                     if all_empty
-                        && logical_block_index
-                            == file_blocks_count.checked_sub(1).unwrap()
+                        && logical_block_index == last_file_block_index
                         && logical_block_index > 0
                     {
                         // Truncate the file to remove the last empty block.
                         truncate(
                             fs,
                             dir_inode,
-                            logical_block_index
-                                .checked_mul(block_size.to_u64())
-                                .unwrap(),
+                            checked_mul_u64(
+                                logical_block_index,
+                                block_size.to_u64(),
+                                dir_inode.index,
+                            )?,
                         )
                         .await?;
                         return Ok(());
@@ -385,11 +437,12 @@ pub(crate) async fn remove_dir_entry(
             }
 
             prev_off = Some(off);
-            off = off.checked_add(rec_len_usize).unwrap();
+            off = rec_end;
         }
 
         is_first = false;
-        logical_block_index = logical_block_index.checked_add(1).unwrap();
+        logical_block_index =
+            checked_add_u64(logical_block_index, 1, dir_inode.index)?;
     }
 
     Err(Ext4Error::NotFound)
@@ -440,16 +493,16 @@ pub(crate) async fn init_directory(
     } else {
         0usize
     };
-    let usable = block_size.checked_sub(tail_size).ok_or_else(|| {
-        Ext4Error::from(CorruptKind::DirEntry(dir_inode.index))
-    })?;
+    let usable = checked_sub_usize(block_size, tail_size, dir_inode.index)?;
 
-    let dot = DirEntryName::try_from(".").expect("valid dir entry name");
-    let dotdot = DirEntryName::try_from("..").expect("valid dir entry name");
+    let dot = DirEntryName::try_from(".")
+        .map_err(|_| dir_entry_error(dir_inode.index))?;
+    let dotdot = DirEntryName::try_from("..")
+        .map_err(|_| dir_entry_error(dir_inode.index))?;
 
-    let dot_len = dir_entry_min_size(dot.as_ref().len());
+    let dot_len = dir_entry_min_size(dot.as_ref().len(), dir_inode.index)?;
     if dot_len >= usable {
-        return Err(CorruptKind::DirEntry(dir_inode.index).into());
+        return Err(dir_entry_error(dir_inode.index));
     }
 
     // '.' entry.
@@ -464,9 +517,8 @@ pub(crate) async fn init_directory(
 
     // '..' entry consumes the remainder of the usable area.
     let dotdot_off = dot_len;
-    let dotdot_rec_len = usable.checked_sub(dotdot_off).ok_or_else(|| {
-        Ext4Error::from(CorruptKind::DirEntry(dir_inode.index))
-    })?;
+    let dotdot_rec_len =
+        checked_sub_usize(usable, dotdot_off, dir_inode.index)?;
 
     write_dir_entry_bytes(
         &mut block_buf,
@@ -479,14 +531,13 @@ pub(crate) async fn init_directory(
 
     // Write checksum dir entry if needed.
     if fs.has_metadata_checksums() {
-        let checksum_start = block_size.checked_sub(12).unwrap();
+        let checksum_start =
+            checked_sub_usize(block_size, 12, dir_inode.index)?;
+        let checksum_tail_offset =
+            checked_add_usize(checksum_start, 4, dir_inode.index)?;
         write_u32le(&mut block_buf, checksum_start, 0);
         let tail_val = 12u32 | (0xDE << 24);
-        write_u32le(
-            &mut block_buf,
-            checksum_start.checked_add(4).unwrap(),
-            tail_val,
-        );
+        write_u32le(&mut block_buf, checksum_tail_offset, tail_val);
         // TODO: Cleanup
         // Update the checksum tail (stored in the last 4 bytes) if enabled.
         DirBlock {
@@ -513,12 +564,13 @@ pub(crate) async fn init_directory(
     Ok(())
 }
 
-fn dir_entry_min_size(name_len: usize) -> usize {
+fn dir_entry_min_size(
+    name_len: usize,
+    inode: InodeIndex,
+) -> Result<usize, Ext4Error> {
     // ext4 dir entry header is 8 bytes; record sizes are 4-byte aligned.
-    let base = 8usize
-        .checked_add(name_len)
-        .expect("dir entry size overflow");
-    (base.checked_add(3).unwrap()) & !3
+    let base = checked_add_usize(8, name_len, inode)?;
+    Ok(checked_add_usize(base, 3, inode)? & !3)
 }
 
 fn write_dir_entry_bytes(
@@ -529,31 +581,35 @@ fn write_dir_entry_bytes(
     name: DirEntryName<'_>,
     file_type: FileType,
 ) -> Result<(), Ext4Error> {
-    let need = dir_entry_min_size(name.as_ref().len());
+    let need = dir_entry_min_size(name.as_ref().len(), inode)?;
     if rec_len < need {
         return Err(Ext4Error::Readonly);
     }
-    if off.checked_add(rec_len).unwrap() > block.len() {
-        return Err(CorruptKind::DirEntry(inode).into());
+
+    let rec_end = checked_add_usize(off, rec_len, inode)?;
+    if rec_end > block.len() {
+        return Err(dir_entry_error(inode));
     }
+
+    let rec_len_offset = checked_add_usize(off, 4, inode)?;
+    let name_len_offset = checked_add_usize(off, 6, inode)?;
+    let file_type_offset = checked_add_usize(off, 7, inode)?;
+    let name_start = checked_add_usize(off, 8, inode)?;
+    let name_end = checked_add_usize(name_start, name.as_ref().len(), inode)?;
 
     write_u32le(block, off, inode.get());
     write_u16le(
         block,
-        off.checked_add(4).unwrap(),
-        u16::try_from(rec_len)
-            .map_err(|_| Ext4Error::from(CorruptKind::DirEntry(inode)))?,
+        rec_len_offset,
+        u16::try_from(rec_len).map_err(|_| dir_entry_error(inode))?,
     );
-    block[off.checked_add(6).unwrap()] = u8::try_from(name.as_ref().len())
-        .map_err(|_| Ext4Error::from(CorruptKind::DirEntry(inode)))?;
-    block[off.checked_add(7).unwrap()] = file_type.to_dir_entry();
-
-    let name_start = off.checked_add(8).unwrap();
-    let name_end = name_start.checked_add(name.as_ref().len()).unwrap();
+    block[name_len_offset] = u8::try_from(name.as_ref().len())
+        .map_err(|_| dir_entry_error(inode))?;
+    block[file_type_offset] = file_type.to_dir_entry();
     block[name_start..name_end].copy_from_slice(name.as_ref());
 
     // Zero padding up to `rec_len`.
-    for b in &mut block[name_end..off.checked_add(rec_len).unwrap()] {
+    for b in &mut block[name_end..rec_end] {
         *b = 0;
     }
 
@@ -726,55 +782,58 @@ pub(crate) async fn add_dir_entry_htree(
         crate::dir_htree::find_leaf_node(fs, dir_inode, name, &mut block_buf)
             .await?;
 
-    let need = dir_entry_min_size(name.as_ref().len());
+    let need = dir_entry_min_size(name.as_ref().len(), dir_inode.index)?;
 
     let mut off = 0usize;
     let mut found_space = false;
 
     while off < block_size {
         let inode_field = read_u32le(&block_buf, off);
-        let rec_len = read_u16le(&block_buf, off.checked_add(4).unwrap());
+        let rec_len_offset = checked_add_usize(off, 4, dir_inode.index)?;
+        let rec_len = read_u16le(&block_buf, rec_len_offset);
         let rec_len_usize = usize::from(rec_len);
+        let rec_end = checked_add_usize(off, rec_len_usize, dir_inode.index)?;
 
-        if rec_len_usize < 8 || off.checked_add(rec_len_usize).is_none() {
-            return Err(CorruptKind::DirEntry(dir_inode.index).into());
-        }
-        if off.checked_add(rec_len_usize).unwrap() > block_size {
-            return Err(CorruptKind::DirEntry(dir_inode.index).into());
+        if rec_len_usize < 8 || rec_end > block_size {
+            return Err(dir_entry_error(dir_inode.index));
         }
 
         let used = if inode_field == 0 {
             0usize
         } else {
-            let name_len = usize::from(block_buf[off.checked_add(6).unwrap()]);
-            dir_entry_min_size(name_len)
+            let name_len_offset = checked_add_usize(off, 6, dir_inode.index)?;
+            let name_len = usize::from(block_buf[name_len_offset]);
+            dir_entry_min_size(name_len, dir_inode.index)?
         };
 
-        if rec_len_usize >= used.checked_add(need).unwrap() {
+        let required = checked_add_usize(used, need, dir_inode.index)?;
+        if rec_len_usize >= required {
             let new_rec_len_for_curr =
                 if inode_field == 0 { 0usize } else { used };
-            let free_start = off.checked_add(new_rec_len_for_curr).unwrap();
-            let free_len =
-                rec_len_usize.checked_sub(new_rec_len_for_curr).unwrap();
+            let free_start =
+                checked_add_usize(off, new_rec_len_for_curr, dir_inode.index)?;
+            let free_len = checked_sub_usize(
+                rec_len_usize,
+                new_rec_len_for_curr,
+                dir_inode.index,
+            )?;
 
             if free_len < need {
-                off = off.checked_add(rec_len_usize).unwrap();
+                off = rec_end;
                 continue;
             }
 
-            if inode_field != 0 {
-                write_u16le(
-                    &mut block_buf,
-                    off.checked_add(4).unwrap(),
-                    u16::try_from(new_rec_len_for_curr).unwrap(),
-                );
+            let rec_len_to_write = if inode_field != 0 {
+                new_rec_len_for_curr
             } else {
-                write_u16le(
-                    &mut block_buf,
-                    off.checked_add(4).unwrap(),
-                    u16::try_from(rec_len_usize).unwrap(),
-                );
-            }
+                rec_len_usize
+            };
+            write_u16le(
+                &mut block_buf,
+                rec_len_offset,
+                u16::try_from(rec_len_to_write)
+                    .map_err(|_| dir_entry_error(dir_inode.index))?,
+            );
 
             write_dir_entry_bytes(
                 &mut block_buf,
@@ -801,7 +860,7 @@ pub(crate) async fn add_dir_entry_htree(
             break;
         }
 
-        off = off.checked_add(rec_len_usize).unwrap();
+        off = rec_end;
     }
 
     if !found_space {
@@ -838,21 +897,23 @@ pub(crate) async fn remove_dir_entry_htree(
 
     while off < block_size {
         let inode_field = read_u32le(&block_buf, off);
-        let rec_len = read_u16le(&block_buf, off.checked_add(4).unwrap());
+        let rec_len_offset = checked_add_usize(off, 4, dir_inode.index)?;
+        let rec_len = read_u16le(&block_buf, rec_len_offset);
         let rec_len_usize = usize::from(rec_len);
+        let rec_end = checked_add_usize(off, rec_len_usize, dir_inode.index)?;
 
-        if rec_len_usize < 8
-            || off.checked_add(rec_len_usize).unwrap() > block_size
-        {
-            return Err(CorruptKind::DirEntry(dir_inode.index).into());
+        if rec_len_usize < 8 || rec_end > block_size {
+            return Err(dir_entry_error(dir_inode.index));
         }
 
         if inode_field != 0 {
-            let name_len = usize::from(block_buf[off.checked_add(6).unwrap()]);
-            let name_start = off.checked_add(8).unwrap();
-            let name_end = name_start.checked_add(name_len).unwrap();
-            if name_end > off.checked_add(rec_len_usize).unwrap() {
-                return Err(CorruptKind::DirEntry(dir_inode.index).into());
+            let name_len_offset = checked_add_usize(off, 6, dir_inode.index)?;
+            let name_len = usize::from(block_buf[name_len_offset]);
+            let name_start = checked_add_usize(off, 8, dir_inode.index)?;
+            let name_end =
+                checked_add_usize(name_start, name_len, dir_inode.index)?;
+            if name_end > rec_end {
+                return Err(dir_entry_error(dir_inode.index));
             }
 
             if block_buf[name_start..name_end] == *name.as_ref() {
@@ -861,15 +922,20 @@ pub(crate) async fn remove_dir_entry_htree(
                 }
 
                 if let Some(poff) = prev_off {
+                    let prev_rec_len_offset =
+                        checked_add_usize(poff, 4, dir_inode.index)?;
                     let prev_rec_len =
-                        read_u16le(&block_buf, poff.checked_add(4).unwrap());
-                    let new_len = usize::from(prev_rec_len)
-                        .checked_add(rec_len_usize)
-                        .unwrap();
+                        read_u16le(&block_buf, prev_rec_len_offset);
+                    let new_len = checked_add_usize(
+                        usize::from(prev_rec_len),
+                        rec_len_usize,
+                        dir_inode.index,
+                    )?;
                     write_u16le(
                         &mut block_buf,
-                        poff.checked_add(4).unwrap(),
-                        u16::try_from(new_len).unwrap(),
+                        prev_rec_len_offset,
+                        u16::try_from(new_len)
+                            .map_err(|_| dir_entry_error(dir_inode.index))?,
                     );
                     write_u32le(&mut block_buf, off, 0);
                 } else {
@@ -893,7 +959,7 @@ pub(crate) async fn remove_dir_entry_htree(
         }
 
         prev_off = Some(off);
-        off = off.checked_add(rec_len_usize).unwrap();
+        off = rec_end;
     }
 
     Err(Ext4Error::NotFound)
