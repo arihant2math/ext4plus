@@ -102,3 +102,34 @@ pub(crate) type PtrPrimitive<T> = alloc::rc::Rc<T>;
 
 #[cfg(feature = "multi-threaded")]
 pub(crate) type PtrPrimitive<T> = alloc::sync::Arc<T>;
+
+#[cfg(all(test, feature = "sync"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mutex_lock() {
+        let mutex = Mutex::new(41);
+        *mutex.lock() += 1;
+        assert_eq!(*mutex.lock(), 42);
+    }
+
+    #[test]
+    fn test_rwlock_read_write() {
+        let lock = RwLock::new(String::from("a"));
+        assert_eq!(&*lock.read(), "a");
+
+        {
+            let mut guard = lock.write();
+            guard.push('b');
+        }
+
+        assert_eq!(&*lock.read(), "ab");
+    }
+
+    #[test]
+    fn test_ptr_primitive_alias() {
+        let ptr = PtrPrimitive::new(7u8);
+        assert_eq!(*ptr, 7);
+    }
+}

@@ -251,3 +251,62 @@ impl Ext4Write for std::fs::File {
         Ok(())
     }
 }
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_write_to_bytes() {
+        let mut dst = [0, 1, 2, 3];
+        assert_eq!(write_to_bytes(&mut dst, 1, &[9, 8]), Some(()));
+        assert_eq!(dst, [0, 9, 8, 3]);
+
+        assert_eq!(write_to_bytes(&mut dst, 4, &[1]), None);
+        assert_eq!(write_to_bytes(&mut dst, u64::MAX, &[1]), None);
+    }
+
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn test_mutex_vec_write() {
+        let storage = Mutex::new(vec![0, 1, 2, 3]);
+
+        storage.write(1, &[9, 8]).await.unwrap();
+        assert_eq!(*storage.lock().unwrap(), vec![0, 9, 8, 3]);
+
+        let err = storage.write(4, &[1]).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "failed to read 1 bytes at offset 4 from a slice of length 4"
+        );
+    }
+
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn test_arc_write_delegates_to_inner_writer() {
+        let storage = Arc::new(Mutex::new(vec![0, 0, 0, 0]));
+
+        storage.write(2, &[5, 6]).await.unwrap();
+
+        assert_eq!(*storage.lock().unwrap(), vec![0, 0, 5, 6]);
+    }
+
+    #[cfg(target_family = "unix")]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn test_file_write() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.as_file().set_len(4).unwrap();
+
+        Ext4Write::write(tmp.as_file(), 1, &[7, 8]).await.unwrap();
+
+        assert_eq!(std::fs::read(tmp.path()).unwrap(), vec![0, 7, 8, 0]);
+    }
+}

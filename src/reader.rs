@@ -268,6 +268,17 @@ fn read_from_bytes(src: &[u8], start_byte: u64, dst: &mut [u8]) -> Option<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::sync::Arc;
+
+    #[test]
+    fn test_read_from_bytes_helper() {
+        let mut dst = [0; 2];
+        assert_eq!(read_from_bytes(&[1, 2, 3], 1, &mut dst), Some(()));
+        assert_eq!(dst, [2, 3]);
+
+        assert_eq!(read_from_bytes(&[1, 2, 3], 3, &mut dst), None);
+        assert_eq!(read_from_bytes(&[1, 2, 3], u64::MAX, &mut dst), None);
+    }
 
     #[maybe_async::test(
         feature = "sync",
@@ -290,6 +301,41 @@ mod tests {
             format!(
                 "failed to read 2 bytes at offset 4 from a slice of length 3"
             )
+        );
+    }
+
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn test_arc_read_delegates_to_inner_reader() {
+        let src = Arc::new(vec![10, 20, 30, 40]);
+
+        let mut dst = [0; 2];
+        src.read(1, &mut dst).await.unwrap();
+
+        assert_eq!(dst, [20, 30]);
+    }
+
+    #[cfg(all(feature = "std", target_family = "unix"))]
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn test_file_read() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), [1u8, 2, 3]).unwrap();
+
+        let mut dst = [0; 2];
+        Ext4Read::read(tmp.as_file(), 1, &mut dst).await.unwrap();
+        assert_eq!(dst, [2, 3]);
+
+        let err = Ext4Read::read(tmp.as_file(), 2, &mut dst)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "failed to read 2 bytes at offset 2 from a slice of length 1"
         );
     }
 }
