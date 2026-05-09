@@ -755,8 +755,9 @@ impl Ext4 {
 
             let free_blocks = bg.free_blocks_count();
 
-            // TODO: capture with NonZeroU32 and subtract 1 without panic
-            if free_blocks > 0 {
+            // idiomatically: if free_blocks > 0
+            // Done with guard to remove unwrap
+            if let Some(free_blocks) = NonZeroU32::new(free_blocks) {
                 let block_bitmap_handle = self.get_block_bitmap_handle(bg_id);
                 let Some(block_num) =
                     block_bitmap_handle.find_first(false, .., self).await?
@@ -767,7 +768,7 @@ impl Ext4 {
                 self.update_block_bitmap_checksum(bg_id, block_bitmap_handle)
                     .await?;
                 bg.set_free_blocks_count(
-                    free_blocks.checked_sub(1u32).unwrap(),
+                    free_blocks.get() - 1u32,
                 );
                 bg.write(self).await?;
                 self.0.superblock.dec_free_blocks_count(1);
