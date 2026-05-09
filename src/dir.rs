@@ -694,48 +694,6 @@ impl Dir {
     }
 }
 
-#[cfg(feature = "std")]
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_util::load_test_disk1;
-
-    #[maybe_async::test(
-        feature = "sync",
-        async(not(feature = "sync"), tokio::test)
-    )]
-    async fn test_get_dir_entry_inode_by_name() {
-        let fs = load_test_disk1().await;
-        let root_inode = fs.read_root_inode().await.unwrap();
-
-        let lookup = |name| {
-            get_dir_entry_inode_by_name(
-                &fs,
-                &root_inode,
-                DirEntryName::try_from(name).unwrap(),
-            )
-        };
-
-        // Check for a few expected entries.
-        // '.' always links to self.
-        let index = lookup(".").await.unwrap().index;
-        assert_eq!(index, root_inode.index);
-        // '..' is normally parent, but in the root dir it's just the
-        // root dir again.
-        let index = lookup("..").await.unwrap().index;
-        assert_eq!(index, root_inode.index);
-        // Don't check specific values of these since they might change
-        // if the test disk is regenerated
-        let res = lookup("empty_file").await;
-        assert!(res.is_ok());
-        let res = lookup("empty_dir").await;
-        assert!(res.is_ok());
-
-        // Check for something that does not exist.
-        let err = lookup("does_not_exist").await.unwrap_err();
-        assert!(matches!(err, Ext4Error::NotFound));
-    }
-}
 /// Add an item to a directory with an htree.
 #[maybe_async::maybe_async]
 pub(crate) async fn add_dir_entry_htree(
@@ -939,4 +897,47 @@ pub(crate) async fn remove_dir_entry_htree(
     }
 
     Err(Ext4Error::NotFound)
+}
+
+#[cfg(feature = "std")]
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::load_test_disk1;
+
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn test_get_dir_entry_inode_by_name() {
+        let fs = load_test_disk1().await;
+        let root_inode = fs.read_root_inode().await.unwrap();
+
+        let lookup = |name| {
+            get_dir_entry_inode_by_name(
+                &fs,
+                &root_inode,
+                DirEntryName::try_from(name).unwrap(),
+            )
+        };
+
+        // Check for a few expected entries.
+        // '.' always links to self.
+        let index = lookup(".").await.unwrap().index;
+        assert_eq!(index, root_inode.index);
+        // '..' is normally parent, but in the root dir it's just the
+        // root dir again.
+        let index = lookup("..").await.unwrap().index;
+        assert_eq!(index, root_inode.index);
+        // Don't check specific values of these since they might change
+        // if the test disk is regenerated
+        let res = lookup("empty_file").await;
+        assert!(res.is_ok());
+        let res = lookup("empty_dir").await;
+        assert!(res.is_ok());
+
+        // Check for something that does not exist.
+        let err = lookup("does_not_exist").await.unwrap_err();
+        assert!(matches!(err, Ext4Error::NotFound));
+    }
 }
