@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - ADDED: Full htree directory support, including expanding when needed, etc.
+- ADDED: Support for extents with internal nodes, allowing for much larger files when the `extents` file system feature is enabled.
 
 ## 0.1.0-beta.4
 
