@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - ADDED: `Ext4::load_with_writer` to allow loading files with write-back.
+- FIXED: indirect block initialization
 
 ## 0.1.0-beta.3
 
