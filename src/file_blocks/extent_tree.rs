@@ -79,11 +79,17 @@ fn add_one_mul_entry_size(n: u16) -> usize {
     }
 }
 
-fn checked_num_entries(len: usize, inode: InodeIndex) -> Result<u16, Ext4Error> {
+fn checked_num_entries(
+    len: usize,
+    inode: InodeIndex,
+) -> Result<u16, Ext4Error> {
     u16::try_from(len).map_err(|_| CorruptKind::ExtentNodeSize(inode).into())
 }
 
-fn checked_entry_end(offset: usize, inode: InodeIndex) -> Result<usize, Ext4Error> {
+fn checked_entry_end(
+    offset: usize,
+    inode: InodeIndex,
+) -> Result<usize, Ext4Error> {
     offset
         .checked_add(ENTRY_SIZE_IN_BYTES)
         .ok_or(CorruptKind::ExtentNotEnoughData(inode).into())
@@ -275,8 +281,11 @@ impl ExtentNode {
             return Err(CorruptKind::ExtentNotEnoughData(inode).into());
         }
 
-        let entries =
-            ExtentNodeEntries::from_bytes(&data[..node_size_in_bytes], &header, inode)?;
+        let entries = ExtentNodeEntries::from_bytes(
+            &data[..node_size_in_bytes],
+            &header,
+            inode,
+        )?;
 
         if ext4.has_metadata_checksums() {
             let checksum_offset = header.checksum_offset();
@@ -669,8 +678,9 @@ impl ExtentTree {
                                 if let Some(left_sibling_index) =
                                     child_index.checked_sub(1)
                                 {
-                                    let sibling_block =
-                                        internal_nodes[left_sibling_index].block;
+                                    let sibling_block = internal_nodes
+                                        [left_sibling_index]
+                                        .block;
                                     let sibling_data = self
                                         .ext4
                                         .read_block(sibling_block)
@@ -709,21 +719,24 @@ impl ExtentTree {
                                 if let Some(right_sibling_index) =
                                     child_index.checked_add(1)
                                 {
-                                    if right_sibling_index < internal_nodes.len() {
+                                    if right_sibling_index
+                                        < internal_nodes.len()
+                                    {
                                         let sibling_block = internal_nodes
                                             [right_sibling_index]
-                                        .block;
+                                            .block;
                                         let sibling_data = self
                                             .ext4
                                             .read_block(sibling_block)
                                             .await?;
-                                        let sibling_node = ExtentNode::from_bytes(
-                                            Some(sibling_block),
-                                            &sibling_data,
-                                            self.inode,
-                                            self.checksum_base.clone(),
-                                            &self.ext4,
-                                        )?;
+                                        let sibling_node =
+                                            ExtentNode::from_bytes(
+                                                Some(sibling_block),
+                                                &sibling_data,
+                                                self.inode,
+                                                self.checksum_base.clone(),
+                                                &self.ext4,
+                                            )?;
                                         next = leftmost_leaf_first_extent(
                                             self,
                                             sibling_node,
@@ -985,7 +998,9 @@ impl ExtentTree {
                     continue;
                 }
             }
-            i = i.checked_add(1).ok_or(CorruptKind::ExtentBlock(self.inode))?;
+            i = i
+                .checked_add(1)
+                .ok_or(CorruptKind::ExtentBlock(self.inode))?;
         }
 
         self.node.header.num_entries =
