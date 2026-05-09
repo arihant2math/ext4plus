@@ -793,14 +793,30 @@ async fn write_at_extent(
                     Extent::allocate(inode.index, current_block, to_try, ext4)
                         .await?;
                 let tried_blocks = new_extent.num_blocks;
-                let metadata_blocks =
-                    extent_tree.insert_extent(new_extent).await?;
-                let new_fs_blocks = inode
-                    .fs_blocks(ext4)?
-                    .checked_add(u64::from(tried_blocks))
-                    .ok_or(Ext4Error::FileTooLarge)?
-                    .checked_add(u64::from(metadata_blocks))
+                let metadata_before = extent_tree.metadata_block_count().await?;
+                extent_tree.insert_extent(new_extent).await?;
+                let metadata_after = extent_tree.metadata_block_count().await?;
+                let metadata_delta = i64::from(metadata_after)
+                    .checked_sub(i64::from(metadata_before))
                     .ok_or(Ext4Error::FileTooLarge)?;
+                let data_delta = i64::from(tried_blocks);
+                let total_delta = data_delta
+                    .checked_add(metadata_delta)
+                    .ok_or(Ext4Error::FileTooLarge)?;
+                let new_fs_blocks = if total_delta >= 0 {
+                    inode
+                        .fs_blocks(ext4)?
+                        .checked_add(
+                            u64::try_from(total_delta)
+                                .map_err(|_| Ext4Error::FileTooLarge)?,
+                        )
+                        .ok_or(Ext4Error::FileTooLarge)?
+                } else {
+                    inode
+                        .fs_blocks(ext4)?
+                        .checked_sub(total_delta.unsigned_abs())
+                        .ok_or(Ext4Error::FileTooLarge)?
+                };
                 inode.set_fs_blocks(new_fs_blocks, ext4)?;
                 // Write data into the newly allocated blocks (same logic as initialized extents except we don't need to read old content)
                 // If first or last block is partial, zero the unwritten parts.
@@ -892,13 +908,16 @@ pub async fn truncate(
                         inode,
                         ext4.clone(),
                     )?;
+                let metadata_before = extent_tree.metadata_block_count().await?;
                 let freed = extent_tree
                     .remove_extent_range(drop_from, drop_count)
                     .await?;
+                let metadata_after = extent_tree.metadata_block_count().await?;
 
                 // Persist modified extent tree in the inode before freeing blocks.
                 inode.set_inline_data(extent_tree.to_bytes()?);
 
+                let mut freed_data_blocks = 0u64;
                 for (start, len) in freed {
                     if start == 0 || len == 0 {
                         continue;
@@ -916,13 +935,22 @@ pub async fn truncate(
                                 .await?;
                             }
                         }
-                        let fs_blocks = inode
-                            .fs_blocks(ext4)?
-                            .checked_sub(u64::from(len))
+                        freed_data_blocks = freed_data_blocks
+                            .checked_add(u64::from(len))
                             .ok_or(CorruptKind::InodeBlockCount(inode.index))?;
-                        inode.set_fs_blocks(fs_blocks, ext4)?;
                     }
                 }
+
+                let metadata_freed = u64::from(metadata_before)
+                    .checked_sub(u64::from(metadata_after))
+                    .ok_or(CorruptKind::InodeBlockCount(inode.index))?;
+                let fs_blocks = inode
+                    .fs_blocks(ext4)?
+                    .checked_sub(freed_data_blocks)
+                    .ok_or(CorruptKind::InodeBlockCount(inode.index))?
+                    .checked_sub(metadata_freed)
+                    .ok_or(CorruptKind::InodeBlockCount(inode.index))?;
+                inode.set_fs_blocks(fs_blocks, ext4)?;
             } else {
                 let mut block_map =
                     file_blocks::block_map::BlockMap::from_inode(
