@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- ADDED: Full htree directory support, including expanding when needed, etc.
+
 ## 0.1.0-beta.4
 
 - ADDED: `Ext4::load_with_writer` to allow loading files with write-back.
