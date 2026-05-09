@@ -11,7 +11,7 @@
 use alloc::vec::Vec;
 
 /// Async version of the `Iterator` trait.
-#[allow(async_fn_in_trait)]
+#[expect(async_fn_in_trait)]
 pub trait AsyncIterator {
     /// The type of the items being yielded by this iterator.
     type Item;

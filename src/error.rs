@@ -703,7 +703,6 @@ pub(crate) enum IncompatibleKind {
     ),
 
     /// One or more unsupported features are present.
-    #[allow(clippy::enum_variant_names)]
     UnsupportedFeatures(
         /// The unsupported features.
         IncompatibleFeatures,
@@ -734,7 +733,6 @@ pub(crate) enum IncompatibleKind {
     ),
 
     /// One or more unsupported journal features are present.
-    #[allow(clippy::enum_variant_names)]
     UnsupportedJournalFeatures(
         /// The unsupported feature bits.
         u32,

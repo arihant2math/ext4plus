@@ -4,7 +4,7 @@ use crate::error::{CorruptKind, Ext4Error};
 use crate::util::{read_u16le, read_u32le};
 
 #[derive(Debug, Clone)]
-#[allow(unused)]
+#[expect(unused)]
 pub(crate) struct Mmp {
     magic: u32,
     seq: u32,

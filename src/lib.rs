@@ -95,8 +95,11 @@
 #![forbid(unsafe_code)]
 #![warn(
     clippy::arithmetic_side_effects,
+    clippy::allow_attributes,
     clippy::as_conversions,
+    clippy::large_futures,
     clippy::must_use_candidate,
+    clippy::rc_mutex,
     clippy::use_self
 )]
 #![warn(missing_docs)]

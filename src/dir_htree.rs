@@ -285,6 +285,7 @@ async fn block_from_file_block(
             .ok_or(CorruptKind::DirEntry(inode.index))?;
         Ok(absolute_block)
     } else {
+        #[expect(clippy::allow_attributes)]
         #[allow(unused_mut)]
         let mut block_map = FileBlocks::new(fs.clone(), inode)?;
         block_map

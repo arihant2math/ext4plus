@@ -11,7 +11,7 @@ pub(crate) struct BitmapHandle {
     is_inode_bitmap: bool,
 }
 
-#[allow(unused)]
+#[expect(unused)]
 impl BitmapHandle {
     pub(crate) fn new(block: FsBlockIndex, is_inode_bitmap: bool) -> Self {
         Self {
