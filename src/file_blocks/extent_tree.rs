@@ -70,15 +70,43 @@ struct NodeHeader {
 ///
 /// The maximum value this returns is 786432.
 fn add_one_mul_entry_size(n: u16) -> usize {
-    // OK to unwrap: the maximum value of `n` is `2^16-1`, so the
-    // maximum value of this sum is `2^16`. That fits in a `u32`, and we
-    // assume `usize` is at least as big as a `u32`.
-    let n_plus_one = usize::from(n).checked_add(1).unwrap();
-    // OK to unwrap: `n_plus_one` is at most `2^16` and
-    // `ENTRY_SIZE_IN_BYTES` is 12, so the maximum product is 786432,
-    // which fits in a `u32`. We assume `usize` is at least as big as a
-    // `u32`.
-    n_plus_one.checked_mul(ENTRY_SIZE_IN_BYTES).unwrap()
+    #[expect(
+        clippy::arithmetic_side_effects,
+        reason = "u16::MAX + 1 is 65536, and 65536 * 12 fits in u32"
+    )]
+    {
+        usize_from_u32((u32::from(n) + 1) * 12)
+    }
+}
+
+fn checked_num_entries(len: usize, inode: InodeIndex) -> Result<u16, Ext4Error> {
+    u16::try_from(len).map_err(|_| CorruptKind::ExtentNodeSize(inode).into())
+}
+
+fn checked_entry_end(offset: usize, inode: InodeIndex) -> Result<usize, Ext4Error> {
+    offset
+        .checked_add(ENTRY_SIZE_IN_BYTES)
+        .ok_or(CorruptKind::ExtentNotEnoughData(inode).into())
+}
+
+fn extent_end(
+    extent: &Extent,
+    inode: InodeIndex,
+) -> Result<FileBlockIndex, Ext4Error> {
+    extent
+        .block_within_file
+        .checked_add(FileBlockIndex::from(extent.num_blocks))
+        .ok_or(CorruptKind::ExtentBlock(inode).into())
+}
+
+fn extent_physical_end(
+    extent: &Extent,
+    inode: InodeIndex,
+) -> Result<FsBlockIndex, Ext4Error> {
+    extent
+        .start_block
+        .checked_add(FsBlockIndex::from(extent.num_blocks))
+        .ok_or(CorruptKind::ExtentBlock(inode).into())
 }
 
 impl NodeHeader {
@@ -165,16 +193,16 @@ impl ExtentInternalNode {
         })
     }
 
-    pub(crate) fn to_bytes(self) -> [u8; 12] {
+    pub(crate) fn to_bytes(self) -> Result<[u8; 12], Ext4Error> {
         let mut bytes = [0u8; 12];
         bytes[0..4].copy_from_slice(&self.block_within_file.to_le_bytes());
         let (ei_start_hi, ei_start_lo) = u64_to_hilo(self.block);
-        let ei_start_hi =
-            u16::try_from(ei_start_hi).expect("block must fit in 48 bits");
+        let ei_start_hi = u16::try_from(ei_start_hi)
+            .map_err(|_| CorruptKind::ExtentBlockOverflow(self.block))?;
         bytes[4..8].copy_from_slice(&ei_start_lo.to_le_bytes());
         bytes[8..10].copy_from_slice(&ei_start_hi.to_le_bytes());
         // The last two bytes are unused.
-        bytes
+        Ok(bytes)
     }
 }
 
@@ -196,9 +224,10 @@ impl ExtentNodeEntries {
             )));
             for i in 0..header.num_entries {
                 let offset = add_one_mul_entry_size(i);
+                let entry_end = checked_entry_end(offset, inode)?;
                 let entry = Extent::from_bytes(
-                    &data[offset
-                        ..offset.checked_add(ENTRY_SIZE_IN_BYTES).unwrap()],
+                    data.get(offset..entry_end)
+                        .ok_or(CorruptKind::ExtentNotEnoughData(inode))?,
                 );
                 entries.push(entry);
             }
@@ -209,9 +238,10 @@ impl ExtentNodeEntries {
             )));
             for i in 0..header.num_entries {
                 let offset = add_one_mul_entry_size(i);
+                let entry_end = checked_entry_end(offset, inode)?;
                 let entry = ExtentInternalNode::from_bytes(
-                    &data[offset
-                        ..offset.checked_add(ENTRY_SIZE_IN_BYTES).unwrap()],
+                    data.get(offset..entry_end)
+                        .ok_or(CorruptKind::ExtentNotEnoughData(inode))?,
                     inode,
                 )?;
                 entries.push(entry);
@@ -237,10 +267,26 @@ impl ExtentNode {
         ext4: &Ext4,
     ) -> Result<Self, Ext4Error> {
         let header = NodeHeader::from_bytes(data, inode)?;
-        let entries = ExtentNodeEntries::from_bytes(data, &header, inode)?;
+        let node_size_in_bytes = header.node_size_in_bytes();
+        if node_size_in_bytes > ext4.0.superblock.block_size() {
+            return Err(CorruptKind::ExtentNodeSize(inode).into());
+        }
+        if data.len() < node_size_in_bytes {
+            return Err(CorruptKind::ExtentNotEnoughData(inode).into());
+        }
+
+        let entries =
+            ExtentNodeEntries::from_bytes(&data[..node_size_in_bytes], &header, inode)?;
+
         if ext4.has_metadata_checksums() {
             let checksum_offset = header.checksum_offset();
-            if data.len() < checksum_offset.checked_add(4).unwrap() {
+            let checksum_end = checksum_offset
+                .checked_add(4)
+                .ok_or(CorruptKind::ExtentNodeSize(inode))?;
+            if checksum_end > ext4.0.superblock.block_size() {
+                return Err(CorruptKind::ExtentNodeSize(inode).into());
+            }
+            if data.len() < checksum_end {
                 return Err(CorruptKind::ExtentNotEnoughData(inode).into());
             }
             let expected_checksum = read_u32le(data, checksum_offset);
@@ -261,9 +307,18 @@ impl ExtentNode {
         &self,
         checksum_base: Option<Checksum>,
     ) -> Result<Vec<u8>, Ext4Error> {
-        let mut bytes = Vec::with_capacity(
-            self.header.checksum_offset().checked_add(4).unwrap(),
-        );
+        let capacity = if checksum_base.is_some() {
+            #[expect(
+                clippy::arithmetic_side_effects,
+                reason = "checksum_offset is at most 786432 bytes"
+            )]
+            {
+                self.header.checksum_offset() + 4
+            }
+        } else {
+            self.header.node_size_in_bytes()
+        };
+        let mut bytes = Vec::with_capacity(capacity);
         bytes.extend_from_slice(&self.header.to_bytes());
         match &self.entries {
             ExtentNodeEntries::Leaf(extents) => {
@@ -273,7 +328,7 @@ impl ExtentNode {
             }
             ExtentNodeEntries::Internal(internal_nodes) => {
                 for internal_node in internal_nodes {
-                    bytes.extend_from_slice(&internal_node.to_bytes());
+                    bytes.extend_from_slice(&internal_node.to_bytes()?);
                 }
             }
         }
@@ -295,7 +350,7 @@ impl ExtentNode {
                 }
                 extents.push(extent);
                 self.header.num_entries =
-                    self.header.num_entries.checked_add(1).unwrap();
+                    u16::try_from(extents.len()).map_err(|_| ())?;
                 Ok(())
             }
             ExtentNodeEntries::Internal(_) => Err(()),
@@ -360,7 +415,9 @@ impl ExtentTree {
             &header,
             inode.index,
         )?;
-        assert_eq!(header.max_entries, 4);
+        if header.max_entries != 4 {
+            return Err(CorruptKind::ExtentNodeSize(inode.index).into());
+        }
         Ok(Self {
             ext4,
             inode: inode.index,
@@ -384,14 +441,9 @@ impl ExtentTree {
             match &node.entries {
                 ExtentNodeEntries::Leaf(extents) => {
                     for extent in extents {
+                        let extent_end = extent_end(extent, self.inode)?;
                         if block_index >= extent.block_within_file
-                            && block_index
-                                < extent
-                                    .block_within_file
-                                    .checked_add(FileBlockIndex::from(
-                                        extent.num_blocks,
-                                    ))
-                                    .unwrap()
+                            && block_index < extent_end
                         {
                             return Ok(Some(*extent));
                         }
@@ -425,12 +477,13 @@ impl ExtentTree {
         block_index: FileBlockIndex,
     ) -> Result<FsBlockIndex, Ext4Error> {
         if let Some(extent) = self.find_extent(block_index).await? {
-            let offset_within_extent =
-                block_index.checked_sub(extent.block_within_file).unwrap();
-            Ok(extent
+            let offset_within_extent = block_index
+                .checked_sub(extent.block_within_file)
+                .ok_or(CorruptKind::ExtentBlock(self.inode))?;
+            extent
                 .start_block
                 .checked_add(FsBlockIndex::from(offset_within_extent))
-                .unwrap())
+                .ok_or(CorruptKind::ExtentBlock(self.inode).into())
         } else {
             Ok(0)
         }
@@ -443,19 +496,19 @@ impl ExtentTree {
         inode_index: InodeIndex,
     ) -> Result<(FsBlockIndex, u32), Ext4Error> {
         if let Some(extent) = self.find_extent(block_index).await? {
-            let offset_within_extent =
-                block_index.checked_sub(extent.block_within_file).unwrap();
+            let offset_within_extent = block_index
+                .checked_sub(extent.block_within_file)
+                .ok_or(CorruptKind::ExtentBlock(self.inode))?;
             return Ok((
                 extent
                     .start_block
                     .checked_add(FsBlockIndex::from(offset_within_extent))
-                    .unwrap(),
+                    .ok_or(CorruptKind::ExtentBlock(self.inode))?,
                 0,
             ));
         }
 
-        let new_block =
-            self.ext4.alloc_block(NonZeroU32::new(1).unwrap()).await?;
+        let new_block = self.ext4.alloc_block(NonZeroU32::MIN).await?;
 
         let extent = Extent {
             block_within_file: block_index,
@@ -491,18 +544,17 @@ impl ExtentTree {
         fn leaf_prev_next(
             extents: &[Extent],
             block_index: FileBlockIndex,
-        ) -> (Option<Extent>, Option<Extent>) {
+            inode: InodeIndex,
+        ) -> Result<(Option<Extent>, Option<Extent>), Ext4Error> {
             let mut prev: Option<Extent> = None;
             let mut next: Option<Extent> = None;
 
             for extent in extents {
                 let start = extent.block_within_file;
-                let end = start
-                    .checked_add(FileBlockIndex::from(extent.num_blocks))
-                    .unwrap();
+                let end = extent_end(extent, inode)?;
 
                 if block_index >= start && block_index < end {
-                    return (Some(*extent), Some(*extent));
+                    return Ok((Some(*extent), Some(*extent)));
                 }
 
                 if end <= block_index {
@@ -516,7 +568,7 @@ impl ExtentTree {
                 }
             }
 
-            (prev, next)
+            Ok((prev, next))
         }
 
         #[maybe_async::maybe_async]
@@ -562,8 +614,10 @@ impl ExtentTree {
                         if internal_nodes.is_empty() {
                             return Ok(None);
                         }
-                        let next_node_block =
-                            internal_nodes.last().unwrap().block;
+                        let Some(next_node) = internal_nodes.last() else {
+                            return Ok(None);
+                        };
+                        let next_node_block = next_node.block;
                         let next_node_data =
                             tree.ext4.read_block(next_node_block).await?;
                         node = ExtentNode::from_bytes(
@@ -590,7 +644,7 @@ impl ExtentTree {
                     }
 
                     let (mut prev, mut next) =
-                        leaf_prev_next(extents, block_index);
+                        leaf_prev_next(extents, block_index, self.inode)?;
 
                     // If we found the containing extent, we’re done.
                     if matches!((&prev, &next), (Some(p), Some(n)) if p == n) {
@@ -603,16 +657,20 @@ impl ExtentTree {
                         // Find previous leaf: go up until we can take a left sibling.
                         let mut i = internal_path.len();
                         while i > 0 {
-                            i = i.checked_sub(1).unwrap();
+                            let Some(prev_i) = i.checked_sub(1) else {
+                                break;
+                            };
+                            i = prev_i;
                             let (parent, child_index) =
                                 internal_path[i].clone();
                             if let ExtentNodeEntries::Internal(internal_nodes) =
                                 &parent.entries
                             {
-                                if child_index > 0 {
-                                    let sibling_block = internal_nodes
-                                        [child_index.checked_sub(1).unwrap()]
-                                    .block;
+                                if let Some(left_sibling_index) =
+                                    child_index.checked_sub(1)
+                                {
+                                    let sibling_block =
+                                        internal_nodes[left_sibling_index].block;
                                     let sibling_data = self
                                         .ext4
                                         .read_block(sibling_block)
@@ -639,35 +697,40 @@ impl ExtentTree {
                         // Find next leaf: go up until we can take a right sibling.
                         let mut i = internal_path.len();
                         while i > 0 {
-                            i = i.checked_sub(1).unwrap();
+                            let Some(prev_i) = i.checked_sub(1) else {
+                                break;
+                            };
+                            i = prev_i;
                             let (parent, child_index) =
                                 internal_path[i].clone();
                             if let ExtentNodeEntries::Internal(internal_nodes) =
                                 &parent.entries
                             {
-                                if child_index.checked_add(1).unwrap()
-                                    < internal_nodes.len()
+                                if let Some(right_sibling_index) =
+                                    child_index.checked_add(1)
                                 {
-                                    let sibling_block = internal_nodes
-                                        [child_index.checked_add(1).unwrap()]
-                                    .block;
-                                    let sibling_data = self
-                                        .ext4
-                                        .read_block(sibling_block)
+                                    if right_sibling_index < internal_nodes.len() {
+                                        let sibling_block = internal_nodes
+                                            [right_sibling_index]
+                                        .block;
+                                        let sibling_data = self
+                                            .ext4
+                                            .read_block(sibling_block)
+                                            .await?;
+                                        let sibling_node = ExtentNode::from_bytes(
+                                            Some(sibling_block),
+                                            &sibling_data,
+                                            self.inode,
+                                            self.checksum_base.clone(),
+                                            &self.ext4,
+                                        )?;
+                                        next = leftmost_leaf_first_extent(
+                                            self,
+                                            sibling_node,
+                                        )
                                         .await?;
-                                    let sibling_node = ExtentNode::from_bytes(
-                                        Some(sibling_block),
-                                        &sibling_data,
-                                        self.inode,
-                                        self.checksum_base.clone(),
-                                        &self.ext4,
-                                    )?;
-                                    next = leftmost_leaf_first_extent(
-                                        self,
-                                        sibling_node,
-                                    )
-                                    .await?;
-                                    break;
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -734,9 +797,7 @@ impl ExtentTree {
         }
 
         let new_start = new_extent.block_within_file;
-        let new_end = new_start
-            .checked_add(FileBlockIndex::from(new_extent.num_blocks))
-            .unwrap();
+        let new_end = extent_end(&new_extent, self.inode)?;
 
         // Find insertion index (keep sorted by file-block start).
         let mut insert_at = extents.len();
@@ -749,11 +810,11 @@ impl ExtentTree {
 
         // Check overlap with previous extent.
         if insert_at > 0 {
-            let prev = extents[insert_at.checked_sub(1).unwrap()];
-            let prev_start = prev.block_within_file;
-            let prev_end = prev_start
-                .checked_add(FileBlockIndex::from(prev.num_blocks))
-                .unwrap();
+            let Some(prev_index) = insert_at.checked_sub(1) else {
+                return Err(CorruptKind::ExtentBlock(self.inode).into());
+            };
+            let prev = extents[prev_index];
+            let prev_end = extent_end(&prev, self.inode)?;
             if new_start < prev_end {
                 return Err(CorruptKind::ExtentBlock(self.inode).into());
             }
@@ -770,15 +831,12 @@ impl ExtentTree {
 
         // If we can't merge with a neighbor, we need an extra slot.
         let can_merge_left = if insert_at > 0 {
-            let left = extents[insert_at.checked_sub(1).unwrap()];
-            let left_end = left
-                .block_within_file
-                .checked_add(FileBlockIndex::from(left.num_blocks))
-                .unwrap();
-            let left_phys_end = left
-                .start_block
-                .checked_add(FsBlockIndex::from(u32::from(left.num_blocks)))
-                .unwrap();
+            let Some(left_index) = insert_at.checked_sub(1) else {
+                return Err(CorruptKind::ExtentBlock(self.inode).into());
+            };
+            let left = extents[left_index];
+            let left_end = extent_end(&left, self.inode)?;
+            let left_phys_end = extent_physical_end(&left, self.inode)?;
             left_end == new_start
                 && left_phys_end == new_extent.start_block
                 && left.is_initialized == new_extent.is_initialized
@@ -788,12 +846,7 @@ impl ExtentTree {
 
         let can_merge_right = if insert_at < extents.len() {
             let right = extents[insert_at];
-            let phys_end = new_extent
-                .start_block
-                .checked_add(FsBlockIndex::from(u32::from(
-                    new_extent.num_blocks,
-                )))
-                .unwrap();
+            let phys_end = extent_physical_end(&new_extent, self.inode)?;
             new_end == right.block_within_file
                 && phys_end == right.start_block
                 && right.is_initialized == new_extent.is_initialized
@@ -818,7 +871,10 @@ impl ExtentTree {
                 None
             };
 
-            let left = &mut extents[insert_at.checked_sub(1).unwrap()];
+            let Some(left_index) = insert_at.checked_sub(1) else {
+                return Err(CorruptKind::ExtentBlock(self.inode).into());
+            };
+            let left = &mut extents[left_index];
             let new_len = (u32::from(left.num_blocks))
                 .checked_add(u32::from(new_extent.num_blocks))
                 .ok_or(Ext4Error::NoSpace)?;
@@ -828,14 +884,8 @@ impl ExtentTree {
             // Maybe also merge with right neighbor now.
             if let Some(right) = right_for_possible_merge {
                 // After merging into left, right is still at index insert_at.
-                let left_phys_end = left
-                    .start_block
-                    .checked_add(FsBlockIndex::from(u32::from(left.num_blocks)))
-                    .unwrap();
-                let left_end = left
-                    .block_within_file
-                    .checked_add(FileBlockIndex::from(left.num_blocks))
-                    .unwrap();
+                let left_phys_end = extent_physical_end(left, self.inode)?;
+                let left_end = extent_end(left, self.inode)?;
                 if left_end == right.block_within_file
                     && left_phys_end == right.start_block
                     && left.is_initialized == right.is_initialized
@@ -862,7 +912,8 @@ impl ExtentTree {
             extents.insert(insert_at, new_extent);
         }
 
-        self.node.header.num_entries = u16::try_from(extents.len()).unwrap();
+        self.node.header.num_entries =
+            checked_num_entries(extents.len(), self.inode)?;
         Ok(0)
     }
 
@@ -906,9 +957,7 @@ impl ExtentTree {
         while i < extents.len() {
             let e = extents[i];
             let e_start = e.block_within_file;
-            let e_end = e_start
-                .checked_add(FileBlockIndex::from(e.num_blocks))
-                .unwrap();
+            let e_end = extent_end(&e, self.inode)?;
 
             let overlaps = e_start < end && e_end > start;
             if overlaps {
@@ -916,13 +965,17 @@ impl ExtentTree {
                 // Still be defensive: compute the intersection and only free that.
                 let inter_start = core::cmp::max(e_start, start);
                 let inter_end = core::cmp::min(e_end, end);
-                let inter_len = inter_end.checked_sub(inter_start).unwrap();
+                let inter_len = inter_end
+                    .checked_sub(inter_start)
+                    .ok_or(CorruptKind::ExtentBlock(self.inode))?;
                 let phys_start = e
                     .start_block
                     .checked_add(FsBlockIndex::from(
-                        inter_start.checked_sub(e_start).unwrap(),
+                        inter_start
+                            .checked_sub(e_start)
+                            .ok_or(CorruptKind::ExtentBlock(self.inode))?,
                     ))
-                    .unwrap();
+                    .ok_or(CorruptKind::ExtentBlock(self.inode))?;
                 freed.push((phys_start, inter_len));
 
                 // If the whole extent lies inside the removal range, drop it.
@@ -932,10 +985,11 @@ impl ExtentTree {
                     continue;
                 }
             }
-            i = i.checked_add(1).unwrap();
+            i = i.checked_add(1).ok_or(CorruptKind::ExtentBlock(self.inode))?;
         }
 
-        self.node.header.num_entries = u16::try_from(extents.len()).unwrap();
+        self.node.header.num_entries =
+            checked_num_entries(extents.len(), self.inode)?;
         Ok(freed)
     }
 
@@ -959,9 +1013,7 @@ impl ExtentTree {
             let mut extent_index: Option<usize> = None;
             for (i, extent) in extents.iter().enumerate() {
                 let start = extent.block_within_file;
-                let end = start
-                    .checked_add(FileBlockIndex::from(extent.num_blocks))
-                    .unwrap();
+                let end = extent_end(extent, inode)?;
                 if split_block_within_file >= start
                     && split_block_within_file < end
                 {
@@ -975,9 +1027,7 @@ impl ExtentTree {
 
             let old = extents[i];
             let start = old.block_within_file;
-            let end = start
-                .checked_add(FileBlockIndex::from(old.num_blocks))
-                .unwrap();
+            let end = extent_end(&old, inode)?;
 
             // No-op at boundaries.
             if split_block_within_file == start
@@ -990,10 +1040,12 @@ impl ExtentTree {
                 return Err(Ext4Error::NoSpace);
             }
 
-            let left_len_u32 =
-                split_block_within_file.checked_sub(start).unwrap();
-            let right_len_u32 =
-                end.checked_sub(split_block_within_file).unwrap();
+            let left_len_u32 = split_block_within_file
+                .checked_sub(start)
+                .ok_or(CorruptKind::ExtentBlock(inode))?;
+            let right_len_u32 = end
+                .checked_sub(split_block_within_file)
+                .ok_or(CorruptKind::ExtentBlock(inode))?;
             let left_len: u16 = u16::try_from(left_len_u32)
                 .map_err(|_| CorruptKind::ExtentBlock(inode))?;
             let right_len: u16 = u16::try_from(right_len_u32)
@@ -1010,13 +1062,15 @@ impl ExtentTree {
                 start_block: old
                     .start_block
                     .checked_add(FsBlockIndex::from(left_len_u32))
-                    .unwrap(),
+                    .ok_or(CorruptKind::ExtentBlock(inode))?,
                 num_blocks: right_len,
                 is_initialized: old.is_initialized,
             };
 
+            let insert_index =
+                i.checked_add(1).ok_or(CorruptKind::ExtentBlock(inode))?;
             extents[i] = left;
-            extents.insert(i.checked_add(1).unwrap(), right);
+            extents.insert(insert_index, right);
 
             Ok((true, i == 0))
         }
@@ -1035,7 +1089,7 @@ impl ExtentTree {
             )?;
             if did_split {
                 self.node.header.num_entries =
-                    u16::try_from(extents.len()).unwrap();
+                    checked_num_entries(extents.len(), self.inode)?;
             }
             return Ok(());
         }
@@ -1076,9 +1130,6 @@ impl ExtentTree {
         }
 
         // `node` is now the leaf node that should contain the extent.
-        let leaf_block =
-            node.block.ok_or(CorruptKind::ExtentBlock(self.inode))?;
-
         let old_first = match &node.entries {
             ExtentNodeEntries::Leaf(extents) => extents.first().copied(),
             _ => None,
@@ -1102,7 +1153,7 @@ impl ExtentTree {
                 (false, false, None)
             } else {
                 node.header.num_entries =
-                    u16::try_from(leaf_extents.len()).unwrap();
+                    checked_num_entries(leaf_extents.len(), self.inode)?;
                 (true, first_changed, leaf_extents.first().copied())
             }
         };
@@ -1192,43 +1243,49 @@ impl ExtentTree {
         loop {
             match &mut node.entries {
                 ExtentNodeEntries::Leaf(extents) => {
-                    let idx = extents.iter().position(|e| {
-                        hint_block >= e.block_within_file
-                            && hint_block
-                                < e.block_within_file
-                                    .checked_add(FileBlockIndex::from(
-                                        e.num_blocks,
-                                    ))
-                                    .unwrap()
-                    });
+                    let mut idx = None;
+                    for (i, extent) in extents.iter().enumerate() {
+                        let end = extent_end(extent, self.inode)?;
+                        if hint_block >= extent.block_within_file
+                            && hint_block < end
+                        {
+                            idx = Some(i);
+                            break;
+                        }
+                    }
 
                     if let Some(idx) = idx {
                         let mut modified = false;
 
                         // Try merge with next
-                        if idx.checked_add(1).unwrap() < extents.len() {
-                            let curr = extents[idx];
-                            let next = extents[idx.checked_add(1).unwrap()];
-                            if Self::can_merge(&curr, &next) {
-                                extents[idx].num_blocks = curr
-                                    .num_blocks
-                                    .checked_add(next.num_blocks)
-                                    .unwrap();
-                                extents.remove(idx.checked_add(1).unwrap());
-                                modified = true;
+                        if let Some(next_idx) = idx.checked_add(1) {
+                            if next_idx < extents.len() {
+                                let curr = extents[idx];
+                                let next = extents[next_idx];
+                                if Self::can_merge(&curr, &next) {
+                                    extents[idx].num_blocks = curr
+                                        .num_blocks
+                                        .checked_add(next.num_blocks)
+                                        .ok_or(CorruptKind::ExtentBlock(
+                                            self.inode,
+                                        ))?;
+                                    extents.remove(next_idx);
+                                    modified = true;
+                                }
                             }
                         }
 
                         // Try merge with prev
-                        if idx > 0 {
+                        if let Some(prev_idx) = idx.checked_sub(1) {
                             let curr = extents[idx];
-                            let prev = extents[idx.checked_sub(1).unwrap()];
+                            let prev = extents[prev_idx];
                             if Self::can_merge(&prev, &curr) {
-                                extents[idx.checked_sub(1).unwrap()]
-                                    .num_blocks = prev
+                                extents[prev_idx].num_blocks = prev
                                     .num_blocks
                                     .checked_add(curr.num_blocks)
-                                    .unwrap();
+                                    .ok_or(CorruptKind::ExtentBlock(
+                                        self.inode,
+                                    ))?;
                                 extents.remove(idx);
                                 modified = true;
                             }
@@ -1236,7 +1293,7 @@ impl ExtentTree {
 
                         if modified {
                             node.header.num_entries =
-                                u16::try_from(extents.len()).unwrap();
+                                checked_num_entries(extents.len(), self.inode)?;
                             if let Some(block) = node.block {
                                 let bytes = node.to_bytes(Some(
                                     self.checksum_base.clone(),
@@ -1273,36 +1330,36 @@ impl ExtentTree {
     }
 
     fn can_merge(left: &Extent, right: &Extent) -> bool {
-        // Logical continuity
-        if left
+        let Some(left_end) = left
             .block_within_file
             .checked_add(FileBlockIndex::from(left.num_blocks))
-            .unwrap()
-            != right.block_within_file
-        {
+        else {
+            return false;
+        };
+        if left_end != right.block_within_file {
             return false;
         }
 
-        // Physical continuity
-        if left
+        let Some(left_phys_end) = left
             .start_block
             .checked_add(FsBlockIndex::from(left.num_blocks))
-            .unwrap()
-            != right.start_block
-        {
+        else {
+            return false;
+        };
+        if left_phys_end != right.start_block {
             return false;
         }
 
-        // State
         if left.is_initialized != right.is_initialized {
             return false;
         }
 
-        // Length limit (32768 blocks = 2^15)
-        if (u32::from(left.num_blocks).checked_add(u32::from(right.num_blocks)))
-            .unwrap()
-            > 32768
-        {
+        let Some(combined_len) =
+            u32::from(left.num_blocks).checked_add(u32::from(right.num_blocks))
+        else {
+            return false;
+        };
+        if combined_len > 32768 {
             return false;
         }
 
