@@ -753,7 +753,6 @@ async fn test_htree_write() {
     feature = "sync",
     async(not(feature = "sync"), tokio::test)
 )]
-#[ignore = "Broken test"]
 async fn test_htree_many_dir_entries() {
     let fs = load_test_disk1_rw().await;
     let big_dir = fs

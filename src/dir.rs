@@ -9,8 +9,12 @@
 
 use crate::Ext4;
 use crate::dir_block::DirBlock;
-use crate::dir_entry::DirEntryName;
-use crate::dir_htree::get_dir_entry_via_htree;
+use crate::dir_entry::{DirEntry, DirEntryName};
+use crate::dir_entry_hash::HashAlg;
+use crate::dir_htree::{
+    advance_leaf_lookup_to_next, get_dir_entry_via_htree,
+    insert_child_into_parent, split_index_path_for_new_child,
+};
 use crate::error::{CorruptKind, Ext4Error};
 use crate::file::{truncate, write_at};
 use crate::file_type::FileType;
@@ -22,7 +26,9 @@ use crate::iters::read_dir::ReadDir;
 use crate::path::PathBuf;
 use crate::util::write_u32le;
 use crate::util::{read_u16le, read_u32le, write_u16le};
+use alloc::sync::Arc;
 use alloc::vec;
+use alloc::vec::Vec;
 
 /// Search a directory inode for an entry with the given `name`. If
 /// found, return the entry's inode, otherwise return a `NotFound`
@@ -750,6 +756,187 @@ impl Dir {
     }
 }
 
+#[derive(Clone)]
+struct HtreeLeafEntryData {
+    hash: u32,
+    inode: InodeIndex,
+    name: Vec<u8>,
+    file_type: FileType,
+}
+
+fn read_htree_leaf_entries(
+    fs: &Ext4,
+    dir_inode: &Inode,
+    hash_alg: HashAlg,
+    block: &[u8],
+) -> Result<Vec<HtreeLeafEntryData>, Ext4Error> {
+    let mut entries = Vec::new();
+    let mut off = 0usize;
+    let path = Arc::new(PathBuf::empty());
+    let seed = fs.0.superblock.htree_hash_seed();
+
+    while off < block.len() {
+        let (entry, entry_size) = DirEntry::from_bytes(
+            fs.clone(),
+            &block[off..],
+            dir_inode.index,
+            path.clone(),
+        )?;
+        off = checked_add_usize(off, entry_size.get(), dir_inode.index)?;
+
+        let Some(entry) = entry else {
+            continue;
+        };
+
+        let name = entry.file_name();
+        entries.push(HtreeLeafEntryData {
+            hash: hash_alg.hash(name, &seed),
+            inode: entry.inode,
+            name: name.as_ref().to_vec(),
+            file_type: entry.file_type()?,
+        });
+    }
+
+    Ok(entries)
+}
+
+fn htree_leaf_usable_bytes(
+    fs: &Ext4,
+    inode: InodeIndex,
+) -> Result<usize, Ext4Error> {
+    let block_size = fs.0.superblock.block_size().to_usize();
+    let tail_size = if fs.has_metadata_checksums() {
+        12usize
+    } else {
+        0usize
+    };
+    checked_sub_usize(block_size, tail_size, inode)
+}
+
+fn htree_leaf_entries_size(
+    entries: &[HtreeLeafEntryData],
+    inode: InodeIndex,
+) -> Result<usize, Ext4Error> {
+    let mut total = 0usize;
+    for entry in entries {
+        total = checked_add_usize(
+            total,
+            dir_entry_min_size(entry.name.len(), inode)?,
+            inode,
+        )?;
+    }
+    Ok(total)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct HtreeLeafSplit {
+    split_index: usize,
+    separator_hash: u32,
+}
+
+fn choose_htree_split(
+    entries: &[HtreeLeafEntryData],
+    inode: InodeIndex,
+    usable: usize,
+) -> Result<Option<HtreeLeafSplit>, Ext4Error> {
+    let mut total = 0usize;
+    let mut entry_sizes = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let size = dir_entry_min_size(entry.name.len(), inode)?;
+        total = checked_add_usize(total, size, inode)?;
+        entry_sizes.push(size);
+    }
+
+    if total <= usable {
+        return Ok(None);
+    }
+
+    let half = usable / 2;
+    let mut left_size = 0usize;
+    let mut split_index = None;
+
+    for (index, size) in entry_sizes.into_iter().enumerate() {
+        let next_left_size = checked_add_usize(left_size, size, inode)?;
+        if next_left_size > half {
+            split_index = Some(index);
+            break;
+        }
+        left_size = next_left_size;
+    }
+
+    let split_index = split_index.ok_or(Ext4Error::NoSpace)?;
+    if split_index == 0 || split_index >= entries.len() {
+        return Err(Ext4Error::NoSpace);
+    }
+
+    let mut separator_hash = entries[split_index].hash;
+    if entries[split_index.checked_sub(1).unwrap()].hash == separator_hash {
+        separator_hash =
+            separator_hash.checked_add(1).ok_or(Ext4Error::NoSpace)?;
+    }
+
+    Ok(Some(HtreeLeafSplit {
+        split_index,
+        separator_hash,
+    }))
+}
+
+fn pack_htree_leaf_block(
+    fs: &Ext4,
+    dir_inode: &Inode,
+    entries: &[HtreeLeafEntryData],
+) -> Result<Vec<u8>, Ext4Error> {
+    if entries.is_empty() {
+        return Err(dir_entry_error(dir_inode.index));
+    }
+
+    let block_size = fs.0.superblock.block_size().to_usize();
+    let usable = htree_leaf_usable_bytes(fs, dir_inode.index)?;
+    let mut block = vec![0u8; block_size];
+    let mut off = 0usize;
+
+    for (idx, entry) in entries.iter().enumerate() {
+        let rec_len = if idx.checked_add(1).unwrap() == entries.len() {
+            checked_sub_usize(usable, off, dir_inode.index)?
+        } else {
+            dir_entry_min_size(entry.name.len(), dir_inode.index)?
+        };
+
+        write_dir_entry_bytes(
+            &mut block,
+            off,
+            rec_len,
+            entry.inode,
+            DirEntryName::try_from(entry.name.as_slice())
+                .map_err(|_| dir_entry_error(dir_inode.index))?,
+            entry.file_type,
+        )?;
+
+        off = checked_add_usize(off, rec_len, dir_inode.index)?;
+    }
+
+    if fs.has_metadata_checksums() {
+        let checksum_start =
+            checked_sub_usize(block_size, 12, dir_inode.index)?;
+        let checksum_tail_offset =
+            checked_add_usize(checksum_start, 4, dir_inode.index)?;
+        write_u32le(&mut block, checksum_start, 0);
+        let tail_val = 12u32 | (0xDE << 24);
+        write_u32le(&mut block, checksum_tail_offset, tail_val);
+        DirBlock {
+            fs,
+            block_index: 0,
+            is_first: false,
+            dir_inode: dir_inode.index,
+            has_htree: true,
+            checksum_base: dir_inode.checksum_base().clone(),
+        }
+        .update_checksum(&mut block)?;
+    }
+
+    Ok(block)
+}
+
 /// Add an item to a directory with an htree.
 #[maybe_async::maybe_async]
 pub(crate) async fn add_dir_entry_htree(
@@ -774,18 +961,18 @@ pub(crate) async fn add_dir_entry_htree(
     }
 
     let block_size = fs.0.superblock.block_size().to_usize();
+    let block_size_u64 = fs.0.superblock.block_size().to_nz_u64();
     let mut block_buf = vec![0u8; block_size];
 
     crate::dir_htree::read_root_block(fs, dir_inode, &mut block_buf).await?;
-
-    let (leaf_absolute_block, _leaf_relative_block) =
-        crate::dir_htree::find_leaf_node(fs, dir_inode, name, &mut block_buf)
+    let hash_alg = HashAlg::from_u8(block_buf[0x1c])?;
+    let mut leaf_lookup =
+        crate::dir_htree::find_leaf_lookup(fs, dir_inode, name, &mut block_buf)
             .await?;
 
     let need = dir_entry_min_size(name.as_ref().len(), dir_inode.index)?;
 
     let mut off = 0usize;
-    let mut found_space = false;
 
     while off < block_size {
         let inode_field = read_u32le(&block_buf, off);
@@ -846,7 +1033,7 @@ pub(crate) async fn add_dir_entry_htree(
 
             DirBlock {
                 fs,
-                block_index: leaf_absolute_block,
+                block_index: leaf_lookup.leaf_absolute_block,
                 is_first: false,
                 dir_inode: dir_inode.index,
                 has_htree: true,
@@ -854,18 +1041,69 @@ pub(crate) async fn add_dir_entry_htree(
             }
             .update_checksum(&mut block_buf)?;
 
-            fs.write_to_block(leaf_absolute_block, 0, &block_buf)
+            fs.write_to_block(leaf_lookup.leaf_absolute_block, 0, &block_buf)
                 .await?;
-            found_space = true;
-            break;
+            return Ok(());
         }
 
         off = rec_end;
     }
 
-    if !found_space {
+    let mut entries =
+        read_htree_leaf_entries(fs, dir_inode, hash_alg, &block_buf)?;
+    entries.push(HtreeLeafEntryData {
+        hash: leaf_lookup.hash,
+        inode,
+        name: name.as_ref().to_vec(),
+        file_type,
+    });
+    entries.sort_by(|lhs, rhs| {
+        lhs.hash
+            .cmp(&rhs.hash)
+            .then_with(|| lhs.name.as_slice().cmp(rhs.name.as_slice()))
+    });
+
+    let usable = htree_leaf_usable_bytes(fs, dir_inode.index)?;
+    if htree_leaf_entries_size(&entries, dir_inode.index)? <= usable {
+        let rebuilt = pack_htree_leaf_block(fs, dir_inode, &entries)?;
+        fs.write_to_block(leaf_lookup.leaf_absolute_block, 0, &rebuilt)
+            .await?;
+        return Ok(());
+    }
+
+    let split = choose_htree_split(&entries, dir_inode.index, usable)?
+        .ok_or(Ext4Error::NoSpace)?;
+    split_index_path_for_new_child(fs, dir_inode, &mut leaf_lookup).await?;
+
+    let left_block =
+        pack_htree_leaf_block(fs, dir_inode, &entries[..split.split_index])?;
+    let right_block =
+        pack_htree_leaf_block(fs, dir_inode, &entries[split.split_index..])?;
+
+    let append_offset = dir_inode.size_in_bytes();
+    if append_offset % block_size_u64 != 0 {
+        return Err(dir_entry_error(dir_inode.index));
+    }
+    let new_leaf_relative_block = u32::try_from(append_offset / block_size_u64)
+        .map_err(|_| Ext4Error::NoSpace)?;
+
+    let n = write_at(fs, dir_inode, &right_block, append_offset).await?;
+    if n != right_block.len() {
         return Err(Ext4Error::NoSpace);
     }
+    dir_inode.write(fs).await?;
+
+    insert_child_into_parent(
+        fs,
+        dir_inode,
+        leaf_lookup.parent(),
+        split.separator_hash,
+        new_leaf_relative_block,
+    )
+    .await?;
+
+    fs.write_to_block(leaf_lookup.leaf_absolute_block, 0, &left_block)
+        .await?;
 
     Ok(())
 }
@@ -888,88 +1126,129 @@ pub(crate) async fn remove_dir_entry_htree(
 
     crate::dir_htree::read_root_block(fs, dir_inode, &mut block_buf).await?;
 
-    let (leaf_absolute_block, _leaf_relative_block) =
-        crate::dir_htree::find_leaf_node(fs, dir_inode, name, &mut block_buf)
+    if name.as_ref() == b"." || name.as_ref() == b".." {
+        return Err(Ext4Error::Readonly);
+    }
+
+    let mut leaf_lookup =
+        crate::dir_htree::find_leaf_lookup(fs, dir_inode, name, &mut block_buf)
             .await?;
 
-    let mut off = 0usize;
-    let mut prev_off: Option<usize> = None;
+    loop {
+        let leaf_absolute_block = leaf_lookup.leaf_absolute_block;
+        let mut off = 0usize;
+        let mut prev_off: Option<usize> = None;
 
-    while off < block_size {
-        let inode_field = read_u32le(&block_buf, off);
-        let rec_len_offset = checked_add_usize(off, 4, dir_inode.index)?;
-        let rec_len = read_u16le(&block_buf, rec_len_offset);
-        let rec_len_usize = usize::from(rec_len);
-        let rec_end = checked_add_usize(off, rec_len_usize, dir_inode.index)?;
+        while off < block_size {
+            let inode_field = read_u32le(&block_buf, off);
+            let rec_len_offset = checked_add_usize(off, 4, dir_inode.index)?;
+            let rec_len = read_u16le(&block_buf, rec_len_offset);
+            let rec_len_usize = usize::from(rec_len);
+            let rec_end =
+                checked_add_usize(off, rec_len_usize, dir_inode.index)?;
 
-        if rec_len_usize < 8 || rec_end > block_size {
-            return Err(dir_entry_error(dir_inode.index));
-        }
-
-        if inode_field != 0 {
-            let name_len_offset = checked_add_usize(off, 6, dir_inode.index)?;
-            let name_len = usize::from(block_buf[name_len_offset]);
-            let name_start = checked_add_usize(off, 8, dir_inode.index)?;
-            let name_end =
-                checked_add_usize(name_start, name_len, dir_inode.index)?;
-            if name_end > rec_end {
+            if rec_len_usize < 8 || rec_end > block_size {
                 return Err(dir_entry_error(dir_inode.index));
             }
 
-            if block_buf[name_start..name_end] == *name.as_ref() {
-                if name.as_ref() == b"." || name.as_ref() == b".." {
-                    return Err(Ext4Error::Readonly);
+            if inode_field != 0 {
+                let name_len_offset =
+                    checked_add_usize(off, 6, dir_inode.index)?;
+                let name_len = usize::from(block_buf[name_len_offset]);
+                let name_start = checked_add_usize(off, 8, dir_inode.index)?;
+                let name_end =
+                    checked_add_usize(name_start, name_len, dir_inode.index)?;
+                if name_end > rec_end {
+                    return Err(dir_entry_error(dir_inode.index));
                 }
 
-                if let Some(poff) = prev_off {
-                    let prev_rec_len_offset =
-                        checked_add_usize(poff, 4, dir_inode.index)?;
-                    let prev_rec_len =
-                        read_u16le(&block_buf, prev_rec_len_offset);
-                    let new_len = checked_add_usize(
-                        usize::from(prev_rec_len),
-                        rec_len_usize,
-                        dir_inode.index,
-                    )?;
-                    write_u16le(
-                        &mut block_buf,
-                        prev_rec_len_offset,
-                        u16::try_from(new_len)
-                            .map_err(|_| dir_entry_error(dir_inode.index))?,
-                    );
-                    write_u32le(&mut block_buf, off, 0);
-                } else {
-                    write_u32le(&mut block_buf, off, 0);
-                }
+                if block_buf[name_start..name_end] == *name.as_ref() {
+                    if let Some(poff) = prev_off {
+                        let prev_rec_len_offset =
+                            checked_add_usize(poff, 4, dir_inode.index)?;
+                        let prev_rec_len =
+                            read_u16le(&block_buf, prev_rec_len_offset);
+                        let new_len = checked_add_usize(
+                            usize::from(prev_rec_len),
+                            rec_len_usize,
+                            dir_inode.index,
+                        )?;
+                        write_u16le(
+                            &mut block_buf,
+                            prev_rec_len_offset,
+                            u16::try_from(new_len).map_err(|_| {
+                                dir_entry_error(dir_inode.index)
+                            })?,
+                        );
+                        write_u32le(&mut block_buf, off, 0);
+                    } else {
+                        write_u32le(&mut block_buf, off, 0);
+                    }
 
-                DirBlock {
-                    fs,
-                    block_index: leaf_absolute_block,
-                    is_first: false,
-                    dir_inode: dir_inode.index,
-                    has_htree: true,
-                    checksum_base: dir_inode.checksum_base().clone(),
-                }
-                .update_checksum(&mut block_buf)?;
+                    DirBlock {
+                        fs,
+                        block_index: leaf_absolute_block,
+                        is_first: false,
+                        dir_inode: dir_inode.index,
+                        has_htree: true,
+                        checksum_base: dir_inode.checksum_base().clone(),
+                    }
+                    .update_checksum(&mut block_buf)?;
 
-                fs.write_to_block(leaf_absolute_block, 0, &block_buf)
-                    .await?;
-                return Ok(());
+                    fs.write_to_block(leaf_absolute_block, 0, &block_buf)
+                        .await?;
+                    return Ok(());
+                }
             }
+
+            prev_off = Some(off);
+            off = rec_end;
         }
 
-        prev_off = Some(off);
-        off = rec_end;
+        if !advance_leaf_lookup_to_next(
+            fs,
+            dir_inode,
+            &mut leaf_lookup,
+            &mut block_buf,
+        )
+        .await?
+        {
+            return Err(Ext4Error::NotFound);
+        }
     }
-
-    Err(Ext4Error::NotFound)
 }
 
 #[cfg(feature = "std")]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::load_test_disk1;
+    use crate::test_util::{load_test_disk1, load_test_disk1_rw};
+    use crate::{FollowSymlinks, InodeCreationOptions, InodeMode};
+
+    #[test]
+    fn test_choose_htree_split_with_hash_collision() {
+        let inode = InodeIndex::new(1).unwrap();
+        let entry = |hash, byte| HtreeLeafEntryData {
+            hash,
+            inode,
+            name: vec![byte; 200],
+            file_type: FileType::Regular,
+        };
+
+        let entries = vec![
+            entry(0x1234_5678, b'a'),
+            entry(0x1234_5678, b'b'),
+            entry(0x2234_5678, b'c'),
+            entry(0x3234_5678, b'd'),
+        ];
+        let usable = dir_entry_min_size(200, inode).unwrap() * 3;
+
+        let split = choose_htree_split(&entries, inode, usable)
+            .unwrap()
+            .unwrap();
+        assert_eq!(split.split_index, 1);
+        assert_eq!(split.separator_hash, 0x1234_5679);
+    }
 
     #[maybe_async::test(
         feature = "sync",
@@ -1005,5 +1284,84 @@ mod tests {
         // Check for something that does not exist.
         let err = lookup("does_not_exist").await.unwrap_err();
         assert!(matches!(err, Ext4Error::NotFound));
+    }
+
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn test_htree_root_split() {
+        let fs = load_test_disk1_rw().await;
+        let medium_dir = fs
+            .path_to_inode(
+                "/medium_dir".try_into().unwrap(),
+                FollowSymlinks::All,
+            )
+            .await
+            .unwrap();
+        let mut dir = Dir::open_inode(&fs.0, medium_dir).unwrap();
+
+        let block_size = fs.superblock().block_size().to_usize();
+        let mut root_block = vec![0; block_size];
+        crate::dir_htree::read_root_block(&fs, dir.inode(), &mut root_block)
+            .await
+            .unwrap();
+        assert_eq!(root_block[0x1e], 0);
+
+        let filler = "x".repeat(240);
+        let mut added = Vec::new();
+        let mut depth = 0u8;
+
+        for i in 0..600 {
+            let name = format!("rootsplit_{i:04}_{filler}");
+            let mut new_inode = fs
+                .create_inode(InodeCreationOptions {
+                    file_type: FileType::Regular,
+                    mode: InodeMode::S_IRUSR
+                        | InodeMode::S_IWUSR
+                        | InodeMode::S_IFREG,
+                    uid: 0,
+                    gid: 0,
+                    time: Default::default(),
+                    flags: InodeFlags::empty(),
+                })
+                .await
+                .unwrap();
+            dir.link(
+                DirEntryName::try_from(name.as_bytes()).unwrap(),
+                &mut new_inode,
+            )
+            .await
+            .unwrap();
+            added.push(name);
+
+            crate::dir_htree::read_root_block(
+                &fs,
+                dir.inode(),
+                &mut root_block,
+            )
+            .await
+            .unwrap();
+            depth = root_block[0x1e];
+            if depth == 1 {
+                break;
+            }
+        }
+
+        assert_eq!(depth, 1, "root htree node never split");
+
+        for name in &added {
+            let inode = dir
+                .get_entry(DirEntryName::try_from(name.as_bytes()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(inode.file_type(), FileType::Regular);
+        }
+
+        let old_entry = dir
+            .get_entry(DirEntryName::try_from("0").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(old_entry.file_type(), FileType::Regular);
     }
 }
