@@ -772,9 +772,7 @@ impl Ext4 {
                 block_bitmap_handle.set(block_num, true, self).await?;
                 self.update_block_bitmap_checksum(bg_id, block_bitmap_handle)
                     .await?;
-                bg.set_free_blocks_count(
-                    free_blocks.get() - 1u32,
-                );
+                bg.set_free_blocks_count(free_blocks.get() - 1u32);
                 bg.write(self).await?;
                 self.0.superblock.dec_free_blocks_count(1);
                 self.0.superblock.write(self).await?;
@@ -856,11 +854,11 @@ impl Ext4 {
                         NonZeroU64::from(self.0.superblock.blocks_per_group())
                             .get(),
                     )
-                    .unwrap())
+                    .ok_or(Ext4Error::NoSpace)?)
                 .checked_add(u64::from(block_num))
-                .unwrap()
+                .ok_or(Ext4Error::NoSpace)?
                 .checked_add(u64::from(self.0.superblock.first_data_block()))
-                .unwrap();
+                .ok_or(Ext4Error::NoSpace)?;
                 return Ok(block_index);
             }
             bg_id = bg_id.saturating_add(1);
@@ -909,7 +907,9 @@ impl Ext4 {
         let zeroes = vec![0; self.0.superblock.block_size().to_usize()];
         for i in 0..num_blocks.get() {
             self.write_to_block(
-                block_index.checked_add(u64::from(i)).unwrap(),
+                block_index
+                    .checked_add(u64::from(i))
+                    .ok_or(Ext4Error::NoSpace)?,
                 0,
                 &zeroes,
             )
@@ -970,7 +970,9 @@ impl Ext4 {
         let bg = self.get_block_group_descriptor(block_group_index);
         let free_blocks = bg.free_blocks_count();
         bg.set_free_blocks_count(
-            free_blocks.checked_add(num_blocks.get()).unwrap(),
+            free_blocks
+                .checked_add(num_blocks.get())
+                .ok_or(Ext4Error::NoSpace)?,
         );
         bg.write(self).await?;
         self.0

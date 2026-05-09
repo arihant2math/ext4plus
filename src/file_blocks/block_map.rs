@@ -133,16 +133,9 @@ impl BlockMap {
         for (i, direct_block) in direct_blocks.iter_mut().enumerate() {
             *direct_block = read_u32le(&data, i.checked_mul(4).unwrap());
         }
-        let single_indirect_block =
-            read_u32le(&data, DIRECT_BLOCKS * 4);
-        let double_indirect_block = read_u32le(
-            &data,
-            (DIRECT_BLOCKS + 1) * 4,
-        );
-        let triple_indirect_block = read_u32le(
-            &data,
-            (DIRECT_BLOCKS + 2) * 4,
-        );
+        let single_indirect_block = read_u32le(&data, DIRECT_BLOCKS * 4);
+        let double_indirect_block = read_u32le(&data, (DIRECT_BLOCKS + 1) * 4);
+        let triple_indirect_block = read_u32le(&data, (DIRECT_BLOCKS + 2) * 4);
         Self {
             fs,
             direct_blocks,
@@ -166,21 +159,15 @@ impl BlockMap {
             data[start..end]
                 .copy_from_slice(&self.direct_blocks[i].to_le_bytes());
         }
-        data[DIRECT_BLOCKS * 4
-            ..(DIRECT_BLOCKS + 1) * 4]
-            .copy_from_slice(
-                &self.single_indirect_block.block_index.value().to_le_bytes(),
-            );
-        data[(DIRECT_BLOCKS + 1) * 4
-            ..(DIRECT_BLOCKS + 2) * 4]
-            .copy_from_slice(
-                &self.double_indirect_block.block_index.value().to_le_bytes(),
-            );
-        data[(DIRECT_BLOCKS + 2) * 4
-            ..(DIRECT_BLOCKS + 3) * 4]
-            .copy_from_slice(
-                &self.triple_indirect_block.block_index.value().to_le_bytes(),
-            );
+        data[DIRECT_BLOCKS * 4..(DIRECT_BLOCKS + 1) * 4].copy_from_slice(
+            &self.single_indirect_block.block_index.value().to_le_bytes(),
+        );
+        data[(DIRECT_BLOCKS + 1) * 4..(DIRECT_BLOCKS + 2) * 4].copy_from_slice(
+            &self.double_indirect_block.block_index.value().to_le_bytes(),
+        );
+        data[(DIRECT_BLOCKS + 2) * 4..(DIRECT_BLOCKS + 3) * 4].copy_from_slice(
+            &self.triple_indirect_block.block_index.value().to_le_bytes(),
+        );
         data
     }
 
