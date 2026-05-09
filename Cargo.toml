@@ -8,11 +8,11 @@
 
 [package]
 name = "ext4plus"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 edition.workspace = true
 license.workspace = true
 repository = "https://github.com/arihant2math/ext4plus"
-categories = ["filesystem", "embedded", "no-std", "async"]
+categories = ["filesystem", "embedded", "no-std", "asynchronous"]
 description = "No-std compatible Rust library for ext2/ext3/ext4 filesystems"
 keywords = ["ext4", "ext2", "ext3", "filesystem", "no_std"]
 rust-version = "1.86"
