@@ -255,7 +255,7 @@ async fn test_new_file_grow() {
         root_dir
             .link(
                 DirEntryName::try_from(b"new_file").unwrap(),
-                &mut file.inode_mut(),
+                file.inode_mut(),
             )
             .await
             .unwrap();
