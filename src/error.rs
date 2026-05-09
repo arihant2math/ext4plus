@@ -340,6 +340,9 @@ pub(crate) enum CorruptKind {
     /// An inode's file type is invalid.
     InodeFileType { inode: InodeIndex, mode: InodeMode },
 
+    /// An inode's stored block count is invalid.
+    InodeBlockCount(InodeIndex),
+
     /// The target of a symlink is not a valid path.
     SymlinkTarget(InodeIndex),
 
@@ -543,6 +546,9 @@ impl Display for CorruptKind {
                     "inode {inode} has invalid file type: mode=0x{mode:04x}",
                     mode = mode.bits()
                 )
+            }
+            Self::InodeBlockCount(inode) => {
+                write!(f, "inode {inode} has an invalid block count")
             }
             Self::SymlinkTarget(inode) => {
                 write!(f, "inode {inode} has an invalid symlink path")
