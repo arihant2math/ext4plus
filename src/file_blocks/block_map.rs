@@ -4,6 +4,7 @@ use crate::{Ext4, Ext4Error, Inode};
 
 use crate::error::CorruptKind;
 use crate::inode::InodeIndex;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::num::{NonZeroU32, NonZeroUsize};
@@ -89,6 +90,15 @@ impl<T: BlockMapEntry> IndirectBlock<T> {
 }
 
 #[maybe_async::maybe_async]
+async fn initialize_indirect_block(
+    fs: &Ext4,
+    block_index: FsBlockIndex,
+) -> Result<(), Ext4Error> {
+    let zeroes = vec![0; fs.0.superblock.block_size().to_usize()];
+    fs.write_to_block(block_index, 0, &zeroes).await
+}
+
+#[maybe_async::maybe_async]
 async fn ensure_allocated<T: BlockMapEntry>(
     block: &mut IndirectBlock<T>,
     allocated: &mut u32,
@@ -97,6 +107,7 @@ async fn ensure_allocated<T: BlockMapEntry>(
     if block.block_index.value() == 0 {
         let new_block_index =
             fs.alloc_block(NonZeroU32::new(1).unwrap()).await?;
+        initialize_indirect_block(fs, new_block_index).await?;
         *allocated = allocated.checked_add(1).unwrap();
         *block = IndirectBlock::new(BlockIndex(
             u32::try_from(new_block_index).unwrap(),
@@ -521,5 +532,29 @@ impl BlockMap {
                 .await?;
         }
         Ok(removed_blocks)
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+    use crate::test_util::load_compressed_filesystem_rw;
+
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn test_initialize_indirect_block_zeroes_contents() {
+        let (fs, _) = load_compressed_filesystem_rw("test_disk_ext2.bin.zst")
+            .await;
+        let block = fs.alloc_block(InodeIndex::new(2).unwrap()).await.unwrap();
+
+        let garbage = vec![0xa5; fs.0.superblock.block_size().to_usize()];
+        fs.write_to_block(block, 0, &garbage).await.unwrap();
+
+        initialize_indirect_block(&fs, block).await.unwrap();
+
+        let block_data = fs.read_block(block).await.unwrap();
+        assert!(block_data.iter().all(|&byte| byte == 0));
     }
 }
