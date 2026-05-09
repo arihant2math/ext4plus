@@ -11,6 +11,47 @@ use core::num::{NonZeroU32, NonZeroUsize};
 
 const DIRECT_BLOCKS: usize = 12;
 
+struct BlockMapLayout {
+    blocks_per_block: NonZeroUsize,
+    blocks_per_double_indirect: NonZeroUsize,
+    single_indirect_limit: usize,
+    double_indirect_limit: usize,
+    triple_indirect_limit: usize,
+}
+
+fn get_block_map_layout(fs: &Ext4) -> Result<BlockMapLayout, Ext4Error> {
+    let blocks_per_block =
+        NonZeroUsize::new(fs.0.superblock.block_size().to_usize() / 4)
+            .ok_or(CorruptKind::InvalidBlockSize)?;
+    let blocks_per_double_indirect = blocks_per_block
+        .checked_mul(blocks_per_block)
+        .ok_or(Ext4Error::FileTooLarge)?;
+    let blocks_per_triple_indirect = blocks_per_double_indirect
+        .checked_mul(blocks_per_block)
+        .ok_or(Ext4Error::FileTooLarge)?;
+    let single_indirect_limit = DIRECT_BLOCKS
+        .checked_add(blocks_per_block.get())
+        .ok_or(Ext4Error::FileTooLarge)?;
+    let double_indirect_limit = single_indirect_limit
+        .checked_add(blocks_per_double_indirect.get())
+        .ok_or(Ext4Error::FileTooLarge)?;
+    let triple_indirect_limit = double_indirect_limit
+        .checked_add(blocks_per_triple_indirect.get())
+        .ok_or(Ext4Error::FileTooLarge)?;
+
+    Ok(BlockMapLayout {
+        blocks_per_block,
+        blocks_per_double_indirect,
+        single_indirect_limit,
+        double_indirect_limit,
+        triple_indirect_limit,
+    })
+}
+
+fn block_index_to_u32(block_index: FsBlockIndex) -> Result<u32, Ext4Error> {
+    u32::try_from(block_index).map_err(|_| Ext4Error::FileTooLarge)
+}
+
 trait BlockMapEntry {
     fn from_index(block_index: BlockIndex) -> Self;
 }
@@ -105,13 +146,12 @@ async fn ensure_allocated<T: BlockMapEntry>(
     fs: &Ext4,
 ) -> Result<(), Ext4Error> {
     if block.block_index.value() == 0 {
-        let new_block_index =
-            fs.alloc_block(NonZeroU32::new(1).unwrap()).await?;
+        let new_block_index = fs.alloc_block(NonZeroU32::MIN).await?;
         initialize_indirect_block(fs, new_block_index).await?;
-        *allocated = allocated.checked_add(1).unwrap();
-        *block = IndirectBlock::new(BlockIndex(
-            u32::try_from(new_block_index).unwrap(),
-        ));
+        *allocated = allocated.checked_add(1).ok_or(Ext4Error::FileTooLarge)?;
+        *block = IndirectBlock::new(BlockIndex(block_index_to_u32(
+            new_block_index,
+        )?));
     }
     Ok(())
 }
@@ -187,49 +227,34 @@ impl BlockMap {
         &self,
         file_block_index: FileBlockIndex,
     ) -> Result<FsBlockIndex, Ext4Error> {
-        let blocks_per_block =
-            NonZeroUsize::new(self.fs.0.superblock.block_size().to_usize() / 4)
-                .unwrap();
-        if usize_from_u32(file_block_index) < DIRECT_BLOCKS {
-            Ok(u64::from(
-                self.direct_blocks[usize_from_u32(file_block_index)],
-            ))
-        } else if usize_from_u32(file_block_index)
-            < DIRECT_BLOCKS.checked_add(blocks_per_block.get()).unwrap()
-        {
+        let layout = get_block_map_layout(&self.fs)?;
+        let file_block_index = usize_from_u32(file_block_index);
+
+        if file_block_index < DIRECT_BLOCKS {
+            Ok(u64::from(self.direct_blocks[file_block_index]))
+        } else if file_block_index < layout.single_indirect_limit {
             if self.single_indirect_block.block_index.value() == 0 {
                 return Ok(0); // TODO: Should error
             }
-            let single_indirect_index = usize_from_u32(file_block_index)
+            let single_indirect_index = file_block_index
                 .checked_sub(DIRECT_BLOCKS)
-                .unwrap();
+                .ok_or(Ext4Error::FileTooLarge)?;
             let block_index = self
                 .single_indirect_block
                 .get(single_indirect_index, &self.fs)
                 .await?;
             Ok(u64::from(block_index.value()))
-        } else if usize_from_u32(file_block_index)
-            < DIRECT_BLOCKS
-                .checked_add(blocks_per_block.get())
-                .unwrap()
-                .checked_add(
-                    blocks_per_block
-                        .checked_mul(blocks_per_block)
-                        .unwrap()
-                        .get(),
-                )
-                .unwrap()
-        {
+        } else if file_block_index < layout.double_indirect_limit {
             if self.double_indirect_block.block_index.value() == 0 {
                 return Ok(0); // TODO: Should error
             }
-            let double_indirect_index = usize_from_u32(file_block_index)
-                .checked_sub(DIRECT_BLOCKS)
-                .unwrap()
-                .checked_sub(blocks_per_block.get())
-                .unwrap();
-            let first_level_index = double_indirect_index / blocks_per_block;
-            let second_level_index = double_indirect_index % blocks_per_block;
+            let double_indirect_index = file_block_index
+                .checked_sub(layout.single_indirect_limit)
+                .ok_or(Ext4Error::FileTooLarge)?;
+            let first_level_index =
+                double_indirect_index / layout.blocks_per_block;
+            let second_level_index =
+                double_indirect_index % layout.blocks_per_block;
             let first_level_block = self
                 .double_indirect_block
                 .get(first_level_index, &self.fs)
@@ -240,47 +265,20 @@ impl BlockMap {
             let block_index =
                 first_level_block.get(second_level_index, &self.fs).await?;
             Ok(u64::from(block_index.value()))
-        } else if usize_from_u32(file_block_index)
-            < DIRECT_BLOCKS
-                .checked_add(blocks_per_block.get())
-                .unwrap()
-                .checked_add(
-                    blocks_per_block
-                        .checked_mul(blocks_per_block)
-                        .unwrap()
-                        .get(),
-                )
-                .unwrap()
-                .checked_add(
-                    blocks_per_block
-                        .checked_mul(blocks_per_block)
-                        .unwrap()
-                        .checked_mul(blocks_per_block)
-                        .unwrap()
-                        .get(),
-                )
-                .unwrap()
-        {
+        } else if file_block_index < layout.triple_indirect_limit {
             if self.triple_indirect_block.block_index.value() == 0 {
                 return Ok(0); // TODO: Should error
             }
-            let triple_indirect_index = usize_from_u32(file_block_index)
-                .checked_sub(DIRECT_BLOCKS)
-                .unwrap()
-                .checked_sub(blocks_per_block.get())
-                .unwrap()
-                .checked_sub(
-                    blocks_per_block
-                        .checked_mul(blocks_per_block)
-                        .unwrap()
-                        .get(),
-                )
-                .unwrap();
-            let first_level_index = triple_indirect_index
-                / (blocks_per_block.checked_mul(blocks_per_block).unwrap());
-            let second_level_index =
-                (triple_indirect_index / blocks_per_block) % blocks_per_block;
-            let third_level_index = triple_indirect_index % blocks_per_block;
+            let triple_indirect_index = file_block_index
+                .checked_sub(layout.double_indirect_limit)
+                .ok_or(Ext4Error::FileTooLarge)?;
+            let first_level_index =
+                triple_indirect_index / layout.blocks_per_double_indirect;
+            let second_level_index = (triple_indirect_index
+                / layout.blocks_per_block)
+                % layout.blocks_per_block;
+            let third_level_index =
+                triple_indirect_index % layout.blocks_per_block;
             let first_level_block = self
                 .triple_indirect_block
                 .get(first_level_index, &self.fs)
@@ -297,7 +295,6 @@ impl BlockMap {
                 second_level_block.get(third_level_index, &self.fs).await?;
             Ok(u64::from(block_index.value()))
         } else {
-            // TODO: proper error
             Err(Ext4Error::FileTooLarge)
         }
     }
@@ -311,19 +308,16 @@ impl BlockMap {
         fs_block_index: FsBlockIndex,
     ) -> Result<u32, Ext4Error> {
         let mut allocated_metadata_blocks: u32 = 0;
-        let blocks_per_block =
-            NonZeroUsize::new(self.fs.0.superblock.block_size().to_usize() / 4)
-                .unwrap();
+        let layout = get_block_map_layout(&self.fs)?;
+        let file_block_index = usize_from_u32(file_block_index);
+        let fs_block_index = block_index_to_u32(fs_block_index)?;
 
-        if usize_from_u32(file_block_index) < DIRECT_BLOCKS {
-            self.direct_blocks[usize_from_u32(file_block_index)] =
-                u32::try_from(fs_block_index).unwrap();
-        } else if usize_from_u32(file_block_index)
-            < DIRECT_BLOCKS.checked_add(blocks_per_block.get()).unwrap()
-        {
-            let single_indirect_index = usize_from_u32(file_block_index)
+        if file_block_index < DIRECT_BLOCKS {
+            self.direct_blocks[file_block_index] = fs_block_index;
+        } else if file_block_index < layout.single_indirect_limit {
+            let single_indirect_index = file_block_index
                 .checked_sub(DIRECT_BLOCKS)
-                .unwrap();
+                .ok_or(Ext4Error::FileTooLarge)?;
             ensure_allocated(
                 &mut self.single_indirect_block,
                 &mut allocated_metadata_blocks,
@@ -333,29 +327,18 @@ impl BlockMap {
             self.single_indirect_block
                 .set(
                     single_indirect_index,
-                    BlockIndex(u32::try_from(fs_block_index).unwrap()),
+                    BlockIndex(fs_block_index),
                     &self.fs,
                 )
                 .await?;
-        } else if usize_from_u32(file_block_index)
-            < DIRECT_BLOCKS
-                .checked_add(blocks_per_block.get())
-                .unwrap()
-                .checked_add(
-                    blocks_per_block
-                        .checked_mul(blocks_per_block)
-                        .unwrap()
-                        .get(),
-                )
-                .unwrap()
-        {
-            let double_indirect_index = usize_from_u32(file_block_index)
-                .checked_sub(DIRECT_BLOCKS)
-                .unwrap()
-                .checked_sub(blocks_per_block.get())
-                .unwrap();
-            let first_level_index = double_indirect_index / blocks_per_block;
-            let second_level_index = double_indirect_index % blocks_per_block;
+        } else if file_block_index < layout.double_indirect_limit {
+            let double_indirect_index = file_block_index
+                .checked_sub(layout.single_indirect_limit)
+                .ok_or(Ext4Error::FileTooLarge)?;
+            let first_level_index =
+                double_indirect_index / layout.blocks_per_block;
+            let second_level_index =
+                double_indirect_index % layout.blocks_per_block;
             ensure_allocated(
                 &mut self.double_indirect_block,
                 &mut allocated_metadata_blocks,
@@ -386,50 +369,19 @@ impl BlockMap {
                     .await?;
             }
             first_level_block
-                .set(
-                    second_level_index,
-                    BlockIndex(u32::try_from(fs_block_index).unwrap()),
-                    &self.fs,
-                )
+                .set(second_level_index, BlockIndex(fs_block_index), &self.fs)
                 .await?;
-        } else if usize_from_u32(file_block_index)
-            < DIRECT_BLOCKS
-                .checked_add(blocks_per_block.get())
-                .unwrap()
-                .checked_add(
-                    blocks_per_block
-                        .checked_mul(blocks_per_block)
-                        .unwrap()
-                        .get(),
-                )
-                .unwrap()
-                .checked_add(
-                    blocks_per_block
-                        .checked_mul(blocks_per_block)
-                        .unwrap()
-                        .checked_mul(blocks_per_block)
-                        .unwrap()
-                        .get(),
-                )
-                .unwrap()
-        {
-            let triple_indirect_index = usize_from_u32(file_block_index)
-                .checked_sub(DIRECT_BLOCKS)
-                .unwrap()
-                .checked_sub(blocks_per_block.get())
-                .unwrap()
-                .checked_sub(
-                    blocks_per_block
-                        .checked_mul(blocks_per_block)
-                        .unwrap()
-                        .get(),
-                )
-                .unwrap();
-            let first_level_index = triple_indirect_index
-                / (blocks_per_block.checked_mul(blocks_per_block).unwrap());
-            let second_level_index =
-                (triple_indirect_index / blocks_per_block) % blocks_per_block;
-            let third_level_index = triple_indirect_index % blocks_per_block;
+        } else if file_block_index < layout.triple_indirect_limit {
+            let triple_indirect_index = file_block_index
+                .checked_sub(layout.double_indirect_limit)
+                .ok_or(Ext4Error::FileTooLarge)?;
+            let first_level_index =
+                triple_indirect_index / layout.blocks_per_double_indirect;
+            let second_level_index = (triple_indirect_index
+                / layout.blocks_per_block)
+                % layout.blocks_per_block;
+            let third_level_index =
+                triple_indirect_index % layout.blocks_per_block;
             ensure_allocated(
                 &mut self.triple_indirect_block,
                 &mut allocated_metadata_blocks,
@@ -481,14 +433,9 @@ impl BlockMap {
                     .await?;
             }
             second_level_block
-                .set(
-                    third_level_index,
-                    BlockIndex(u32::try_from(fs_block_index).unwrap()),
-                    &self.fs,
-                )
+                .set(third_level_index, BlockIndex(fs_block_index), &self.fs)
                 .await?;
         } else {
-            // TODO: proper error
             return Err(Ext4Error::FileTooLarge);
         }
         Ok(allocated_metadata_blocks)
@@ -500,8 +447,7 @@ impl BlockMap {
         file_block_index: FileBlockIndex,
         inode_index: InodeIndex,
     ) -> Result<(FsBlockIndex, u32), Ext4Error> {
-        let new_block_index =
-            self.fs.alloc_block(NonZeroU32::new(1).unwrap()).await?;
+        let new_block_index = self.fs.alloc_block(NonZeroU32::MIN).await?;
         let metadata_blocks =
             self.set_block(file_block_index, new_block_index).await?;
         Ok((new_block_index, metadata_blocks))
@@ -519,17 +465,16 @@ impl BlockMap {
             return Ok(Vec::new());
         }
 
-        let end_usize = start.checked_add(count).unwrap();
+        let end_usize =
+            start.checked_add(count).ok_or(Ext4Error::FileTooLarge)?;
         let mut removed_blocks = Vec::with_capacity(usize_from_u32(count));
 
         for i in start..end_usize {
-            let block =
-                self.get_block(FileBlockIndex::try_from(i).unwrap()).await?;
+            let block = self.get_block(i).await?;
             if block != 0 {
                 removed_blocks.push(block);
             }
-            self.set_block(FileBlockIndex::try_from(i).unwrap(), 0)
-                .await?;
+            self.set_block(i, 0).await?;
         }
         Ok(removed_blocks)
     }
@@ -545,8 +490,8 @@ mod tests {
         async(not(feature = "sync"), tokio::test)
     )]
     async fn test_initialize_indirect_block_zeroes_contents() {
-        let (fs, _) = load_compressed_filesystem_rw("test_disk_ext2.bin.zst")
-            .await;
+        let (fs, _) =
+            load_compressed_filesystem_rw("test_disk_ext2.bin.zst").await;
         let block = fs.alloc_block(InodeIndex::new(2).unwrap()).await.unwrap();
 
         let garbage = vec![0xa5; fs.0.superblock.block_size().to_usize()];
