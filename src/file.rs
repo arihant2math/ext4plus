@@ -15,12 +15,13 @@
 use crate::block_index::FileBlockIndex;
 use crate::error::{CorruptKind, Ext4Error};
 use crate::extent::Extent;
+use crate::features::FilesystemFeature;
 use crate::file_blocks::FileBlocks;
 use crate::inode::Inode;
 use crate::path::Path;
 use crate::resolve::FollowSymlinks;
 use crate::util::{u64_from_usize, usize_from_u32};
-use crate::{Ext4, InodeFlags, file_blocks};
+use crate::{Ext4, IncompatibleFeatures, InodeFlags, file_blocks};
 use core::cmp::max;
 use core::fmt::{self, Debug, Formatter};
 use core::num::NonZeroU32;
@@ -60,6 +61,12 @@ impl File {
             file_blocks: FileBlocks::from_inode(&inode, fs.clone())?,
             inode,
         })
+    }
+
+    fn refresh_file_blocks(&mut self) -> Result<(), Ext4Error> {
+        self.file_blocks =
+            FileBlocks::from_inode(&self.inode, self.fs.clone())?;
+        Ok(())
     }
 
     /// Access the internal [`Inode`] for this file. This allows for reading metadata etc.
@@ -122,8 +129,7 @@ impl File {
         let written =
             write_at(&self.fs, &mut self.inode, buf, self.position).await?;
         self.position = add_to_file_offset(self.position, written)?;
-        // Update file blocks to reflect any changes from the write (e.g., new blocks allocated, extents split/merged, etc.).
-        self.seek_to(self.position).await?;
+        self.refresh_file_blocks()?;
         Ok(written)
     }
 
@@ -136,13 +142,61 @@ impl File {
         buf: &[u8],
         pos: u64,
     ) -> Result<usize, Ext4Error> {
-        write_at(&self.fs, &mut self.inode, buf, pos).await
+        let written = write_at(&self.fs, &mut self.inode, buf, pos).await?;
+        self.refresh_file_blocks()?;
+        Ok(written)
     }
 
     /// Truncate the file to `new_size` bytes.
     #[maybe_async::maybe_async]
     pub async fn truncate(&mut self, new_size: u64) -> Result<(), Ext4Error> {
         truncate(&self.fs, &mut self.inode, new_size).await?;
+        self.refresh_file_blocks()?;
+        Ok(())
+    }
+
+    /// Claim `num_blocks` filesystem blocks for this file as uninitialized extents.
+    ///
+    /// Claimed blocks read back as zeroes until they are written. The file size is
+    /// unchanged.
+    ///
+    /// This operation is only supported for files that use extents.
+    #[maybe_async::maybe_async]
+    pub async fn claim_uninitialized_blocks(
+        &mut self,
+        start_block: u32,
+        num_blocks: u32,
+    ) -> Result<(), Ext4Error> {
+        claim_uninitialized_blocks(
+            &self.fs,
+            &mut self.inode,
+            start_block,
+            num_blocks,
+        )
+        .await?;
+        self.refresh_file_blocks()?;
+        Ok(())
+    }
+
+    /// Free any still-uninitialized blocks in `[start_block, start_block + num_blocks)`.
+    ///
+    /// Initialized blocks are left intact. The file size is unchanged.
+    ///
+    /// This operation is only supported for files that use extents.
+    #[maybe_async::maybe_async]
+    pub async fn free_uninitialized_blocks(
+        &mut self,
+        start_block: u32,
+        num_blocks: u32,
+    ) -> Result<(), Ext4Error> {
+        free_uninitialized_blocks(
+            &self.fs,
+            &mut self.inode,
+            start_block,
+            num_blocks,
+        )
+        .await?;
+        self.refresh_file_blocks()?;
         Ok(())
     }
 
@@ -560,20 +614,97 @@ async fn write_at_extent(
     #[expect(clippy::too_many_arguments)]
     #[maybe_async::maybe_async]
     async fn write_into_uninitialized_extent(
-        _ext4: &Ext4,
-        _inode: &Inode,
-        _extent: &Extent,
-        _offset_in_extent: usize,
-        _run_blocks: usize,
-        _buf: &[u8],
-        _offset_in_block: usize,
-        _block_size: usize,
+        extent_tree: &mut file_blocks::extent_tree::ExtentTree,
+        ext4: &Ext4,
+        inode: &Inode,
+        extent: &Extent,
+        offset_in_extent: usize,
+        run_blocks: usize,
+        buf: &[u8],
+        offset_in_block: usize,
+        block_size: usize,
     ) -> Result<usize, Ext4Error> {
-        // For an uninitialized (unwritten) extent, we need to allocate blocks and mark them initialized.
-        // For full-blocks, we can directly write and then flip to initialized.
-        // For partial blocks, we must zero the unwritten parts to preserve the semantics of uninitialized extents.
-        // This helper should handle both cases and return the number of bytes written.
-        unimplemented!()
+        if buf.is_empty() || run_blocks == 0 {
+            return Ok(0);
+        }
+        if offset_in_block >= block_size {
+            return Err(CorruptKind::InvalidBlockSize.into());
+        }
+
+        let extent_blocks = usize::from(extent.num_blocks);
+        let blocks_to_write = core::cmp::min(
+            run_blocks,
+            extent_blocks.saturating_sub(offset_in_extent),
+        );
+        if blocks_to_write == 0 {
+            return Ok(0);
+        }
+
+        let mut written = 0usize;
+        let mut blocks_written = 0usize;
+
+        for i in 0..blocks_to_write {
+            let fs_block_offset = offset_in_extent
+                .checked_add(i)
+                .ok_or(Ext4Error::FileTooLarge)?;
+            let fs_block = extent
+                .start_block
+                .checked_add(u64_from_usize(fs_block_offset))
+                .ok_or(CorruptKind::ExtentBlock(inode.index))?;
+
+            let (block_offset, capacity) = if i == 0 {
+                (
+                    offset_in_block,
+                    block_size
+                        .checked_sub(offset_in_block)
+                        .ok_or(CorruptKind::InvalidBlockSize)?,
+                )
+            } else {
+                (0usize, block_size)
+            };
+
+            let remaining = buf.len().saturating_sub(written);
+            let take = core::cmp::min(remaining, capacity);
+            if take == 0 {
+                break;
+            }
+
+            let write_end = range_end(written, take)?;
+            let chunk = &buf[written..write_end];
+
+            if block_offset == 0 && take == block_size {
+                ext4.write_to_block(fs_block, 0, chunk).await?;
+            } else {
+                let mut block_buf = alloc::vec![0u8; block_size];
+                let block_end = block_offset
+                    .checked_add(take)
+                    .ok_or(CorruptKind::InvalidBlockSize)?;
+                block_buf[block_offset..block_end].copy_from_slice(chunk);
+                ext4.write_to_block(fs_block, 0, &block_buf).await?;
+            }
+
+            written = write_end;
+            blocks_written = i.checked_add(1).ok_or(Ext4Error::FileTooLarge)?;
+        }
+
+        if blocks_written > 0 {
+            let start_block = extent
+                .block_within_file
+                .checked_add(
+                    u32::try_from(offset_in_extent)
+                        .map_err(|_| Ext4Error::FileTooLarge)?,
+                )
+                .ok_or(CorruptKind::ExtentBlock(inode.index))?;
+            extent_tree
+                .mark_initialized(
+                    start_block,
+                    u32::try_from(blocks_written)
+                        .map_err(|_| Ext4Error::FileTooLarge)?,
+                )
+                .await?;
+        }
+
+        Ok(written)
     }
 
     #[maybe_async::maybe_async]
@@ -753,7 +884,10 @@ async fn write_at_extent(
                     // For full-blocks: we can directly write blocks and then flip to initialized.
                     // For partial blocks: we must zero the rest of the block(s) we don't overwrite.
                     // this helper must split the extent and mark the written blocks initialized
-                    write_into_uninitialized_extent(
+                    let metadata_before =
+                        extent_tree.metadata_block_count().await?;
+                    let written = write_into_uninitialized_extent(
+                        &mut extent_tree,
                         ext4,
                         inode,
                         &extent,
@@ -763,7 +897,28 @@ async fn write_at_extent(
                         start_offset_in_block,
                         block_size_usize,
                     )
-                    .await?
+                    .await?;
+                    let metadata_after =
+                        extent_tree.metadata_block_count().await?;
+                    let metadata_delta = i64::from(metadata_after)
+                        .checked_sub(i64::from(metadata_before))
+                        .ok_or(Ext4Error::FileTooLarge)?;
+                    let new_fs_blocks = if metadata_delta >= 0 {
+                        inode
+                            .fs_blocks(ext4)?
+                            .checked_add(
+                                u64::try_from(metadata_delta)
+                                    .map_err(|_| Ext4Error::FileTooLarge)?,
+                            )
+                            .ok_or(Ext4Error::FileTooLarge)?
+                    } else {
+                        inode
+                            .fs_blocks(ext4)?
+                            .checked_sub(metadata_delta.unsigned_abs())
+                            .ok_or(Ext4Error::FileTooLarge)?
+                    };
+                    inode.set_fs_blocks(new_fs_blocks, ext4)?;
+                    written
                 };
                 total_written = total_written
                     .checked_add(written_in_run)
@@ -867,6 +1022,142 @@ async fn write_at_extent(
     inode.write(ext4).await?;
 
     Ok(total_written)
+}
+
+/// Claim `num_blocks` filesystem blocks for `inode` as uninitialized extents.
+///
+/// Claimed blocks read back as zeroes until they are written. The inode size is
+/// unchanged.
+///
+/// This operation is only supported for files that use extents.
+#[maybe_async::maybe_async]
+pub async fn claim_uninitialized_blocks(
+    ext4: &Ext4,
+    inode: &mut Inode,
+    start_block: u32,
+    num_blocks: u32,
+) -> Result<(), Ext4Error> {
+    if inode.flags().contains(InodeFlags::IMMUTABLE) {
+        return Err(Ext4Error::Readonly);
+    }
+    if !inode.flags().contains(InodeFlags::EXTENTS) {
+        return Err(Ext4Error::UnsupportedOperation(
+            FilesystemFeature::Incompatible(IncompatibleFeatures::EXTENTS),
+        ));
+    }
+    if num_blocks == 0 {
+        return Ok(());
+    }
+
+    let mut extent_tree =
+        file_blocks::extent_tree::ExtentTree::from_inode(inode, ext4.clone())?;
+    let metadata_before = extent_tree.metadata_block_count().await?;
+    let claimed = extent_tree
+        .claim_uninitialized_range(start_block, num_blocks)
+        .await?;
+    if claimed == 0 {
+        return Ok(());
+    }
+    let metadata_after = extent_tree.metadata_block_count().await?;
+    let metadata_delta = i64::from(metadata_after)
+        .checked_sub(i64::from(metadata_before))
+        .ok_or(CorruptKind::InodeBlockCount(inode.index))?;
+    let total_delta = i64::from(claimed)
+        .checked_add(metadata_delta)
+        .ok_or(CorruptKind::InodeBlockCount(inode.index))?;
+    let fs_blocks = if total_delta >= 0 {
+        inode
+            .fs_blocks(ext4)?
+            .checked_add(
+                u64::try_from(total_delta)
+                    .map_err(|_| CorruptKind::InodeBlockCount(inode.index))?,
+            )
+            .ok_or(CorruptKind::InodeBlockCount(inode.index))?
+    } else {
+        inode
+            .fs_blocks(ext4)?
+            .checked_sub(total_delta.unsigned_abs())
+            .ok_or(CorruptKind::InodeBlockCount(inode.index))?
+    };
+    inode.set_fs_blocks(fs_blocks, ext4)?;
+    inode.set_inline_data(extent_tree.to_bytes()?);
+    inode.write(ext4).await?;
+    Ok(())
+}
+
+/// Free any still-uninitialized blocks in `[start_block, start_block + num_blocks)`.
+///
+/// Initialized blocks are left intact. The inode size is unchanged.
+///
+/// This operation is only supported for files that use extents.
+#[maybe_async::maybe_async]
+pub async fn free_uninitialized_blocks(
+    ext4: &Ext4,
+    inode: &mut Inode,
+    start_block: u32,
+    num_blocks: u32,
+) -> Result<(), Ext4Error> {
+    if inode.flags().contains(InodeFlags::IMMUTABLE) {
+        return Err(Ext4Error::Readonly);
+    }
+    if !inode.flags().contains(InodeFlags::EXTENTS) {
+        return Err(Ext4Error::UnsupportedOperation(
+            FilesystemFeature::Incompatible(IncompatibleFeatures::EXTENTS),
+        ));
+    }
+    if num_blocks == 0 {
+        return Ok(());
+    }
+
+    let mut extent_tree =
+        file_blocks::extent_tree::ExtentTree::from_inode(inode, ext4.clone())?;
+    let metadata_before = extent_tree.metadata_block_count().await?;
+    let freed = extent_tree
+        .free_uninitialized_range(start_block, num_blocks)
+        .await?;
+    if freed.is_empty() {
+        return Ok(());
+    }
+    let metadata_after = extent_tree.metadata_block_count().await?;
+
+    // Persist the modified extent tree before freeing blocks.
+    inode.set_inline_data(extent_tree.to_bytes()?);
+
+    let mut freed_data_blocks = 0u64;
+    for (start, len) in freed {
+        if start == 0 || len == 0 {
+            continue;
+        }
+        if let Some(nz) = NonZeroU32::new(len) {
+            if ext4.free_blocks(start, nz).await.is_err() {
+                for i in 0..len {
+                    ext4.free_block(
+                        start
+                            .checked_add(u64::from(i))
+                            .ok_or(CorruptKind::ExtentBlock(inode.index))?,
+                    )
+                    .await?;
+                }
+            }
+            freed_data_blocks =
+                freed_data_blocks
+                    .checked_add(u64::from(len))
+                    .ok_or(CorruptKind::InodeBlockCount(inode.index))?;
+        }
+    }
+
+    let metadata_freed = u64::from(metadata_before)
+        .checked_sub(u64::from(metadata_after))
+        .ok_or(CorruptKind::InodeBlockCount(inode.index))?;
+    let fs_blocks = inode
+        .fs_blocks(ext4)?
+        .checked_sub(freed_data_blocks)
+        .ok_or(CorruptKind::InodeBlockCount(inode.index))?
+        .checked_sub(metadata_freed)
+        .ok_or(CorruptKind::InodeBlockCount(inode.index))?;
+    inode.set_fs_blocks(fs_blocks, ext4)?;
+    inode.write(ext4).await?;
+    Ok(())
 }
 
 /// Truncate `inode` to `new_size` bytes, freeing blocks as necessary.
