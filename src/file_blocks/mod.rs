@@ -54,6 +54,13 @@ impl FileBlocks {
     ) -> Result<FsBlockIndex, Ext4Error> {
         match self {
             Self::ExtentTree(extent_tree) => {
+                let Some(extent) = extent_tree.find_extent(block_index).await?
+                else {
+                    return Ok(0);
+                };
+                if !extent.is_initialized {
+                    return Ok(0);
+                }
                 extent_tree.get_block(block_index).await
             }
             Self::BlockMap(block_map) => block_map.get_block(block_index).await,

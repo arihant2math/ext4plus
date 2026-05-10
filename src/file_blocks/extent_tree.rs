@@ -1131,6 +1131,102 @@ impl ExtentTree {
         self.rebuild_from_extents(extents).await
     }
 
+    /// Claim blocks in holes within `[start, start + num_blocks)` as uninitialized extents.
+    ///
+    /// Returns the number of newly allocated data blocks.
+    #[maybe_async::maybe_async]
+    pub(crate) async fn claim_uninitialized_range(
+        &mut self,
+        start: FileBlockIndex,
+        num_blocks: u32,
+    ) -> Result<u32, Ext4Error> {
+        const MAX_UNINITIALIZED_EXTENT_BLOCKS: u16 = 32_767;
+
+        if num_blocks == 0 {
+            return Ok(0);
+        }
+
+        let end = start.checked_add(num_blocks).ok_or(Ext4Error::NoSpace)?;
+        let mut extents = self.collect_extents().await?;
+        self.normalize_extents(&mut extents)?;
+
+        let mut current = start;
+        let mut index = 0usize;
+        let mut claimed = 0u32;
+        let mut new_extents = Vec::new();
+        let mut allocated_ranges = Vec::new();
+
+        while current < end {
+            while index < extents.len()
+                && extent_end(&extents[index], self.inode)? <= current
+            {
+                index = index
+                    .checked_add(1)
+                    .ok_or(CorruptKind::ExtentNodeSize(self.inode))?;
+            }
+
+            let hole_end = if let Some(extent) = extents.get(index) {
+                core::cmp::min(extent.block_within_file, end)
+            } else {
+                end
+            };
+
+            if current < hole_end {
+                let mut hole_start = current;
+                while hole_start < hole_end {
+                    let remaining = hole_end
+                        .checked_sub(hole_start)
+                        .ok_or(CorruptKind::ExtentBlock(self.inode))?;
+                    let to_try = match u16::try_from(remaining) {
+                        Ok(blocks) => {
+                            blocks.min(MAX_UNINITIALIZED_EXTENT_BLOCKS)
+                        }
+                        Err(_) => MAX_UNINITIALIZED_EXTENT_BLOCKS,
+                    };
+                    let mut extent = Extent::allocate(
+                        self.inode, hole_start, to_try, &self.ext4,
+                    )
+                    .await?;
+                    extent.is_initialized = false;
+                    claimed = claimed
+                        .checked_add(u32::from(extent.num_blocks))
+                        .ok_or(Ext4Error::NoSpace)?;
+                    allocated_ranges.push((
+                        extent.start_block,
+                        u32::from(extent.num_blocks),
+                    ));
+                    hole_start = hole_start
+                        .checked_add(u32::from(extent.num_blocks))
+                        .ok_or(Ext4Error::NoSpace)?;
+                    new_extents.push(extent);
+                }
+                current = hole_end;
+                continue;
+            }
+
+            let Some(extent) = extents.get(index) else {
+                break;
+            };
+            current = core::cmp::min(extent_end(extent, self.inode)?, end);
+        }
+
+        if new_extents.is_empty() {
+            return Ok(0);
+        }
+
+        extents.extend(new_extents);
+        if let Err(err) = self.rebuild_from_extents(extents).await {
+            for (block, len) in allocated_ranges {
+                if let Some(nz) = NonZeroU32::new(len) {
+                    let _ = self.ext4.free_blocks(block, nz).await;
+                }
+            }
+            return Err(err);
+        }
+
+        Ok(claimed)
+    }
+
     /// Remove all extents that overlap file-block range [start, start+num_blocks)
     /// and return any freed [`FsBlockIndex`] ranges.
     #[maybe_async::maybe_async]
@@ -1215,6 +1311,93 @@ impl ExtentTree {
         Ok(freed)
     }
 
+    /// Free all uninitialized extents that overlap file-block range `[start, start + num_blocks)`
+    /// and return any freed [`FsBlockIndex`] ranges.
+    #[maybe_async::maybe_async]
+    pub(crate) async fn free_uninitialized_range(
+        &mut self,
+        start: FileBlockIndex,
+        num_blocks: u32,
+    ) -> Result<Vec<(FsBlockIndex, u32)>, Ext4Error> {
+        if num_blocks == 0 {
+            return Ok(Vec::new());
+        }
+
+        let end = start.checked_add(num_blocks).ok_or(Ext4Error::NoSpace)?;
+        let mut extents = self.collect_extents().await?;
+        let mut remaining = Vec::with_capacity(extents.len());
+        let mut freed = Vec::new();
+        let mut changed = false;
+
+        for extent in extents.drain(..) {
+            let extent_start = extent.block_within_file;
+            let extent_end = extent_end(&extent, self.inode)?;
+
+            if extent_end <= start
+                || extent_start >= end
+                || extent.is_initialized
+            {
+                remaining.push(extent);
+                continue;
+            }
+
+            changed = true;
+            let remove_start = core::cmp::max(extent_start, start);
+            let remove_end = core::cmp::min(extent_end, end);
+            let remove_len = remove_end
+                .checked_sub(remove_start)
+                .ok_or(CorruptKind::ExtentBlock(self.inode))?;
+            let remove_phys_start = extent
+                .start_block
+                .checked_add(FsBlockIndex::from(
+                    remove_start
+                        .checked_sub(extent_start)
+                        .ok_or(CorruptKind::ExtentBlock(self.inode))?,
+                ))
+                .ok_or(CorruptKind::ExtentBlock(self.inode))?;
+            freed.push((remove_phys_start, remove_len));
+
+            if extent_start < remove_start {
+                let left_len = remove_start
+                    .checked_sub(extent_start)
+                    .ok_or(CorruptKind::ExtentBlock(self.inode))?;
+                remaining.push(Extent {
+                    block_within_file: extent_start,
+                    start_block: extent.start_block,
+                    num_blocks: u16::try_from(left_len)
+                        .map_err(|_| CorruptKind::ExtentBlock(self.inode))?,
+                    is_initialized: false,
+                });
+            }
+
+            if extent_end > remove_end {
+                let right_len = extent_end
+                    .checked_sub(remove_end)
+                    .ok_or(CorruptKind::ExtentBlock(self.inode))?;
+                remaining.push(Extent {
+                    block_within_file: remove_end,
+                    start_block: extent
+                        .start_block
+                        .checked_add(FsBlockIndex::from(
+                            remove_end
+                                .checked_sub(extent_start)
+                                .ok_or(CorruptKind::ExtentBlock(self.inode))?,
+                        ))
+                        .ok_or(CorruptKind::ExtentBlock(self.inode))?,
+                    num_blocks: u16::try_from(right_len)
+                        .map_err(|_| CorruptKind::ExtentBlock(self.inode))?,
+                    is_initialized: false,
+                });
+            }
+        }
+
+        if changed {
+            self.rebuild_from_extents(remaining).await?;
+        }
+
+        Ok(freed)
+    }
+
     /// Split an existing extent so that there is a boundary at `split_block_within_file`.
     #[maybe_async::maybe_async]
     async fn split_extent_at(
@@ -1279,7 +1462,7 @@ impl ExtentTree {
 
     /// Mark a (contiguous) file-block range as initialized.
     #[maybe_async::maybe_async]
-    async fn mark_initialized(
+    pub(crate) async fn mark_initialized(
         &mut self,
         start: FileBlockIndex,
         num_blocks: u32,
@@ -1412,7 +1595,8 @@ impl ExtentTree {
         else {
             return false;
         };
-        if combined_len > 32768 {
+        let max_len = if left.is_initialized { 32_768 } else { 32_767 };
+        if combined_len > max_len {
             return false;
         }
 
@@ -1726,6 +1910,10 @@ mod tests {
             assert_eq!(block, 201);
             let extent = tree.find_extent(12).await.unwrap();
             assert_eq!(extent, None);
+
+            // The helper allocates detached metadata blocks for the synthetic tree,
+            // so free them before the fsck-on-drop wrapper validates the image.
+            tree.free_metadata_blocks().await.unwrap();
         }
     }
 
@@ -1751,6 +1939,10 @@ mod tests {
         // Exactly at the second internal key should descend into leaf1.
         let e = tree.find_extent(10).await.unwrap().unwrap();
         assert_eq!(e.block_within_file, 10);
+
+        // The helper allocates detached metadata blocks for the synthetic tree,
+        // so free them before the fsck-on-drop wrapper validates the image.
+        tree.free_metadata_blocks().await.unwrap();
     }
 
     #[maybe_async::test(
@@ -1812,6 +2004,11 @@ mod tests {
             let extent = tree.find_extent(i * 10).await.unwrap().unwrap();
             assert_eq!(extent.start_block, 100 + u64::from(i) * 10);
         }
+
+        // `insert_extent` grows the in-memory tree by allocating a metadata
+        // block, but this test never persists the synthetic tree into an inode.
+        // Free the temporary metadata before the fsck-on-drop wrapper runs.
+        tree.free_metadata_blocks().await.unwrap();
     }
 
     #[maybe_async::test(
