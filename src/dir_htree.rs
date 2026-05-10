@@ -19,10 +19,10 @@ use crate::iters::AsyncIterator;
 use crate::iters::extents::Extents;
 use crate::iters::file_blocks::FileBlocks;
 use crate::path::PathBuf;
+use crate::sync::PtrPrimitive;
 use crate::util::{
     read_u16le, read_u32le, usize_from_u32, write_u16le, write_u32le,
 };
-use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -304,7 +304,7 @@ fn read_dot_or_dotdot(
         fs,
         &block[offset..],
         inode.index,
-        Arc::new(PathBuf::empty()),
+        PtrPrimitive::new(PathBuf::empty()),
     )?;
     let entry = entry.ok_or_else(corrupt)?;
     if entry.file_name() == name {
@@ -406,7 +406,7 @@ fn scan_leaf_block_for_name(
     name: DirEntryName<'_>,
     block: &[u8],
 ) -> Result<Option<DirEntry>, Ext4Error> {
-    let path = Arc::new(PathBuf::empty());
+    let path = PtrPrimitive::new(PathBuf::empty());
     let mut offset_within_block = 0usize;
 
     while offset_within_block < block.len() {

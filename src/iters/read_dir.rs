@@ -17,7 +17,7 @@ use crate::inode::{Inode, InodeFlags, InodeIndex};
 use crate::iters::AsyncIterator;
 use crate::iters::file_blocks::FileBlocks;
 use crate::path::PathBuf;
-use alloc::sync::Arc;
+use crate::sync::PtrPrimitive;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
@@ -31,7 +31,7 @@ pub struct ReadDir {
     ///
     /// Note that this path may be empty, e.g. if `read_dir` was called
     /// with an inode rather than a path.
-    path: Arc<PathBuf>,
+    path: PtrPrimitive<PathBuf>,
 
     /// Iterator over the blocks of the directory.
     file_blocks: FileBlocks,
@@ -81,7 +81,7 @@ impl ReadDir {
 
         Ok(Self {
             fs: fs.clone(),
-            path: Arc::new(path),
+            path: PtrPrimitive::new(path),
             file_blocks: FileBlocks::new(fs.clone(), inode)?,
             block_index: None,
             is_first_block: true,

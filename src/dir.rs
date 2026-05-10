@@ -24,9 +24,9 @@ use crate::iters::AsyncIterator;
 use crate::iters::file_blocks::FileBlocks;
 use crate::iters::read_dir::ReadDir;
 use crate::path::PathBuf;
+use crate::sync::PtrPrimitive;
 use crate::util::write_u32le;
 use crate::util::{read_u16le, read_u32le, write_u16le};
-use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -772,7 +772,7 @@ fn read_htree_leaf_entries(
 ) -> Result<Vec<HtreeLeafEntryData>, Ext4Error> {
     let mut entries = Vec::new();
     let mut off = 0usize;
-    let path = Arc::new(PathBuf::empty());
+    let path = PtrPrimitive::new(PathBuf::empty());
     let seed = fs.0.superblock.htree_hash_seed();
 
     while off < block.len() {
