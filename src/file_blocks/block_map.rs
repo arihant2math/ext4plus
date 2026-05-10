@@ -6,7 +6,6 @@ use crate::util::{read_u32le, u64_from_usize, usize_from_u32};
 use crate::{Ext4, Ext4Error, Inode};
 
 use crate::error::CorruptKind;
-use crate::inode::InodeIndex;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
@@ -444,18 +443,6 @@ impl BlockMap {
         Ok(allocated_metadata_blocks)
     }
 
-    #[maybe_async::maybe_async]
-    pub(crate) async fn allocate_block(
-        &mut self,
-        file_block_index: FileBlockIndex,
-        _inode_index: InodeIndex,
-    ) -> Result<(FsBlockIndex, u32), Ext4Error> {
-        let new_block_index = self.fs.alloc_block(NonZeroU32::MIN).await?;
-        let metadata_blocks =
-            self.set_block(file_block_index, new_block_index).await?;
-        Ok((new_block_index, metadata_blocks))
-    }
-
     /// Clear a range of file blocks from the mapping and return the corresponding
     /// allocated filesystem blocks that were removed.
     #[maybe_async::maybe_async]
@@ -619,6 +606,7 @@ impl BlockMap {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
+    use crate::inode::InodeIndex;
     use crate::test_util::load_compressed_filesystem_rw;
 
     #[maybe_async::test(

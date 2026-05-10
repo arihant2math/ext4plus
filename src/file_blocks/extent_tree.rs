@@ -5,6 +5,7 @@
 // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
+#![allow(unused)]
 
 use super::utils::{
     add_to_file_offset, file_block_from_offset, free_freed_ranges,
@@ -107,16 +108,6 @@ fn extent_end(
     extent
         .block_within_file
         .checked_add(FileBlockIndex::from(extent.num_blocks))
-        .ok_or(CorruptKind::ExtentBlock(inode).into())
-}
-
-fn extent_physical_end(
-    extent: &Extent,
-    inode: InodeIndex,
-) -> Result<FsBlockIndex, Ext4Error> {
-    extent
-        .start_block
-        .checked_add(FsBlockIndex::from(extent.num_blocks))
         .ok_or(CorruptKind::ExtentBlock(inode).into())
 }
 

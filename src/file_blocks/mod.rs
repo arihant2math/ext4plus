@@ -1,8 +1,5 @@
-#![allow(unused)]
-
 use crate::block_index::{FileBlockIndex, FsBlockIndex};
 use crate::features::FilesystemFeature;
-use crate::inode::InodeIndex;
 use crate::{Ext4, Ext4Error, IncompatibleFeatures, Inode, InodeFlags};
 
 pub(crate) mod block_map;
@@ -148,24 +145,6 @@ impl FileBlocks {
             Self::BlockMap(_) => Err(Ext4Error::UnsupportedOperation(
                 FilesystemFeature::Incompatible(IncompatibleFeatures::EXTENTS),
             )),
-        }
-    }
-
-    /// Allocate a block for the file at `block_index`,
-    /// and return the index of the allocated block and the number of metadata blocks allocated.
-    #[maybe_async::maybe_async]
-    pub(crate) async fn allocate_block(
-        &mut self,
-        block_index: FileBlockIndex,
-        inode_index: InodeIndex,
-    ) -> Result<(FsBlockIndex, u32), Ext4Error> {
-        match self {
-            Self::ExtentTree(extent_tree) => {
-                extent_tree.allocate_block(block_index, inode_index).await
-            }
-            Self::BlockMap(block_map) => {
-                block_map.allocate_block(block_index, inode_index).await
-            }
         }
     }
 }
