@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## 0.1.0-rc.1
+
 - ADDED: Full htree directory support, including expanding when needed, etc.
 - ADDED: Support for extents with internal nodes, allowing for much larger files when the `extents` file system feature is enabled.
 - ADDED: `File::claim_uninitialized_blocks`, `File::free_uninitialized_blocks` and `claim_uninitialized_blocks`, `free_uninitialized_blocks`.
