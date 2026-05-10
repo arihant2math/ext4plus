@@ -615,6 +615,70 @@ async fn test_truncate_to_zero() {
     feature = "sync",
     async(not(feature = "sync"), tokio::test)
 )]
+async fn test_claim_and_free_uninitialized_blocks() {
+    let fs = load_test_disk1_rw().await;
+    let block_size = 1024usize;
+
+    let mut inode = fs
+        .create_inode(InodeCreationOptions {
+            file_type: FileType::Regular,
+            mode: InodeMode::S_IRUSR | InodeMode::S_IWUSR | InodeMode::S_IFREG,
+            uid: 0,
+            gid: 0,
+            time: Default::default(),
+            flags: InodeFlags::empty(),
+        })
+        .await
+        .unwrap();
+    let root_inode = fs.read_root_inode().await.unwrap();
+    let mut root_dir = Dir::open_inode(&fs.0, root_inode).unwrap();
+    root_dir
+        .link(
+            DirEntryName::try_from(b"claimed_uninit").unwrap(),
+            &mut inode,
+        )
+        .await
+        .unwrap();
+
+    let mut file = fs.open("/claimed_uninit").await.unwrap();
+    file.truncate((block_size * 2) as u64).await.unwrap();
+    assert_eq!(file.inode().fs_blocks(&fs).unwrap(), 0);
+
+    file.claim_uninitialized_blocks(0, 2).await.unwrap();
+    assert_eq!(file.inode().fs_blocks(&fs).unwrap(), 2);
+
+    let mut buf = vec![0xaa; block_size * 2];
+    file.seek_to(0).await.unwrap();
+    let n0 = file.read_bytes(&mut buf[..block_size]).await.unwrap();
+    let n1 = file.read_bytes(&mut buf[block_size..]).await.unwrap();
+    assert_eq!(n0 + n1, block_size * 2);
+    assert!(buf.iter().all(|&b| b == 0));
+
+    let written = file.write_bytes_at(b"abc", 10).await.unwrap();
+    assert_eq!(written, 3);
+
+    let mut expected = vec![0u8; block_size * 2];
+    expected[10..13].copy_from_slice(b"abc");
+    let data = fs.read("/claimed_uninit").await.unwrap();
+    assert_eq!(data, expected);
+
+    file.free_uninitialized_blocks(0, 2).await.unwrap();
+    assert_eq!(file.inode().fs_blocks(&fs).unwrap(), 1);
+    let data = fs.read("/claimed_uninit").await.unwrap();
+    assert_eq!(data, expected);
+
+    let mut buf = vec![0xaa; block_size * 2];
+    file.seek_to(0).await.unwrap();
+    let n0 = file.read_bytes(&mut buf[..block_size]).await.unwrap();
+    let n1 = file.read_bytes(&mut buf[block_size..]).await.unwrap();
+    assert_eq!(n0 + n1, block_size * 2);
+    assert_eq!(buf, expected);
+}
+
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
 async fn test_create_symlink() {
     let fses = [load_test_disk1_rw().await, load_ext2_rw().await];
     for fs in fses {
