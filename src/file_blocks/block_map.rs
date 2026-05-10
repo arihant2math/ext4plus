@@ -1,5 +1,8 @@
+use super::utils::{
+    add_to_file_offset, file_block_from_offset, offset_in_block_usize,
+};
 use crate::block_index::{FileBlockIndex, FsBlockIndex};
-use crate::util::{read_u32le, usize_from_u32};
+use crate::util::{read_u32le, u64_from_usize, usize_from_u32};
 use crate::{Ext4, Ext4Error, Inode};
 
 use crate::error::CorruptKind;
@@ -445,7 +448,7 @@ impl BlockMap {
     pub(crate) async fn allocate_block(
         &mut self,
         file_block_index: FileBlockIndex,
-        inode_index: InodeIndex,
+        _inode_index: InodeIndex,
     ) -> Result<(FsBlockIndex, u32), Ext4Error> {
         let new_block_index = self.fs.alloc_block(NonZeroU32::MIN).await?;
         let metadata_blocks =
@@ -477,6 +480,139 @@ impl BlockMap {
             self.set_block(i, 0).await?;
         }
         Ok(removed_blocks)
+    }
+
+    #[maybe_async::maybe_async]
+    pub(crate) async fn write_at(
+        &mut self,
+        inode: &mut Inode,
+        buf: &[u8],
+        offset: u64,
+    ) -> Result<usize, Ext4Error> {
+        let block_size = self.fs.0.superblock.block_size();
+        let block_size_u64 = block_size.to_u64();
+        let block_size_usize = block_size.to_usize();
+        let start_block = file_block_from_offset(offset, block_size_u64)?;
+        let offset_in_block = offset_in_block_usize(offset, block_size_u64)?;
+        let remaining_in_block = block_size_usize
+            .checked_sub(offset_in_block)
+            .ok_or(CorruptKind::InvalidBlockSize)?;
+
+        if remaining_in_block > 0 {
+            let to_write = core::cmp::min(buf.len(), remaining_in_block);
+            let new_size = add_to_file_offset(offset, to_write)?;
+            let fs_block = match self.get_block(start_block).await? {
+                0 => {
+                    let new_fs_block = self.fs.alloc_block(inode.index).await?;
+                    let metadata_blocks =
+                        self.set_block(start_block, new_fs_block).await?;
+                    let new_fs_blocks = inode
+                        .fs_blocks(&self.fs)?
+                        .checked_add(1)
+                        .ok_or(Ext4Error::FileTooLarge)?
+                        .checked_add(u64::from(metadata_blocks))
+                        .ok_or(Ext4Error::FileTooLarge)?;
+                    inode.set_fs_blocks(new_fs_blocks, &self.fs)?;
+                    inode.set_inline_data(self.to_bytes());
+                    inode.write(&self.fs).await?;
+                    new_fs_block
+                }
+                fs_block => fs_block,
+            };
+            self.fs
+                .write_to_block(
+                    fs_block,
+                    u32::try_from(offset_in_block)
+                        .map_err(|_| CorruptKind::InvalidBlockSize)?,
+                    &buf[..to_write],
+                )
+                .await?;
+            if new_size > inode.size_in_bytes() {
+                inode.set_size_in_bytes(new_size);
+                inode.write(&self.fs).await?;
+            }
+            Ok(to_write)
+        } else {
+            let to_write = core::cmp::min(buf.len(), block_size_usize);
+            let new_size = add_to_file_offset(offset, to_write)?;
+            let next_block =
+                start_block.checked_add(1).ok_or(Ext4Error::FileTooLarge)?;
+            let fs_block = match self.get_block(next_block).await? {
+                0 => {
+                    let new_fs_block = self.fs.alloc_block(inode.index).await?;
+                    let metadata_blocks =
+                        self.set_block(next_block, new_fs_block).await?;
+                    let new_fs_blocks = inode
+                        .fs_blocks(&self.fs)?
+                        .checked_add(1)
+                        .ok_or(Ext4Error::FileTooLarge)?
+                        .checked_add(u64::from(metadata_blocks))
+                        .ok_or(Ext4Error::FileTooLarge)?;
+                    inode.set_fs_blocks(new_fs_blocks, &self.fs)?;
+                    inode.set_inline_data(self.to_bytes());
+                    inode.write(&self.fs).await?;
+                    new_fs_block
+                }
+                fs_block => fs_block,
+            };
+            let write_buf = &buf[..to_write];
+            self.fs.write_to_block(fs_block, 0, write_buf).await?;
+            if new_size > inode.size_in_bytes() {
+                inode.set_size_in_bytes(new_size);
+                inode.write(&self.fs).await?;
+            }
+            Ok(write_buf.len())
+        }
+    }
+
+    #[maybe_async::maybe_async]
+    pub(crate) async fn truncate(
+        &mut self,
+        inode: &mut Inode,
+        new_size: u64,
+    ) -> Result<(), Ext4Error> {
+        let old_size = inode.size_in_bytes();
+        if new_size == old_size {
+            return Ok(());
+        }
+
+        if new_size > old_size {
+            inode.set_size_in_bytes(new_size);
+            inode.write(&self.fs).await?;
+            return Ok(());
+        }
+
+        let block_size_u64 = self.fs.0.superblock.block_size().to_u64();
+        let old_blocks = old_size.div_ceil(block_size_u64);
+        let new_blocks = new_size.div_ceil(block_size_u64);
+
+        if new_blocks < old_blocks {
+            let drop_from = FileBlockIndex::try_from(new_blocks)
+                .map_err(|_| Ext4Error::FileTooLarge)?;
+            let drop_count = u32::try_from(
+                old_blocks
+                    .checked_sub(new_blocks)
+                    .ok_or(Ext4Error::FileTooLarge)?,
+            )
+            .map_err(|_| Ext4Error::FileTooLarge)?;
+
+            let freed = self.remove_range(drop_from, drop_count).await?;
+            let fs_blocks = inode
+                .fs_blocks(&self.fs)?
+                .checked_sub(u64_from_usize(freed.len()))
+                .ok_or(CorruptKind::InodeBlockCount(inode.index))?;
+            inode.set_fs_blocks(fs_blocks, &self.fs)?;
+            inode.set_inline_data(self.to_bytes());
+            for blk in freed {
+                if blk != 0 {
+                    self.fs.free_block(blk).await?;
+                }
+            }
+        }
+
+        inode.set_size_in_bytes(new_size);
+        inode.write(&self.fs).await?;
+        Ok(())
     }
 }
 

@@ -6,6 +6,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use super::utils::{
+    add_to_file_offset, file_block_from_offset, free_freed_ranges,
+    offset_in_block_usize, range_end,
+};
 use crate::Ext4;
 use crate::block_index::{FileBlockIndex, FsBlockIndex};
 use crate::checksum::Checksum;
@@ -17,6 +21,7 @@ use crate::util::{
 };
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cmp::max;
 use core::num::NonZeroU32;
 
 /// Find the child index to descend into for `block_index`.
@@ -1601,6 +1606,683 @@ impl ExtentTree {
         }
 
         true
+    }
+
+    #[maybe_async::maybe_async]
+    pub(crate) async fn write_at(
+        &mut self,
+        inode: &mut Inode,
+        buf: &[u8],
+        offset: u64,
+    ) -> Result<usize, Ext4Error> {
+        const MAX_INITIALIZED_EXTENT_BLOCKS: u16 = 32_768;
+
+        fn blocks_needed_for_bytes(
+            offset_in_block: usize,
+            bytes_remaining: usize,
+            block_size: usize,
+        ) -> Result<usize, Ext4Error> {
+            if bytes_remaining == 0 {
+                return Ok(0);
+            }
+            if offset_in_block >= block_size {
+                return Err(CorruptKind::InvalidBlockSize.into());
+            }
+
+            let first_block_capacity = block_size
+                .checked_sub(offset_in_block)
+                .ok_or(CorruptKind::InvalidBlockSize)?;
+            if bytes_remaining <= first_block_capacity {
+                Ok(1)
+            } else {
+                let remaining_after_first = bytes_remaining
+                    .checked_sub(first_block_capacity)
+                    .ok_or(Ext4Error::FileTooLarge)?;
+                1usize
+                    .checked_add(remaining_after_first.div_ceil(block_size))
+                    .ok_or(Ext4Error::FileTooLarge)
+            }
+        }
+
+        fn bytes_for_blocks(
+            num_blocks: usize,
+            offset_in_block: usize,
+            block_size: usize,
+        ) -> Result<usize, Ext4Error> {
+            if num_blocks == 0 {
+                return Ok(0);
+            }
+            if offset_in_block >= block_size {
+                return Err(CorruptKind::InvalidBlockSize.into());
+            }
+
+            let first_block_capacity = block_size
+                .checked_sub(offset_in_block)
+                .ok_or(CorruptKind::InvalidBlockSize)?;
+            if num_blocks == 1 {
+                return Ok(first_block_capacity.min(block_size));
+            }
+
+            let remaining_blocks =
+                num_blocks.checked_sub(1).ok_or(Ext4Error::FileTooLarge)?;
+            let remaining_bytes = remaining_blocks
+                .checked_mul(block_size)
+                .ok_or(Ext4Error::FileTooLarge)?;
+            first_block_capacity
+                .checked_add(remaining_bytes)
+                .ok_or(Ext4Error::FileTooLarge)
+        }
+
+        #[expect(clippy::too_many_arguments)]
+        #[maybe_async::maybe_async]
+        async fn write_into_mapped_initialized_extent(
+            ext4: &Ext4,
+            inode: &Inode,
+            extent: &Extent,
+            offset_in_extent: usize,
+            run_blocks: usize,
+            buf: &[u8],
+            offset_in_block: usize,
+            block_size: usize,
+        ) -> Result<usize, Ext4Error> {
+            if buf.is_empty() || run_blocks == 0 {
+                return Ok(0);
+            }
+
+            let extent_blocks = usize::from(extent.num_blocks);
+            let blocks_to_write = core::cmp::min(
+                run_blocks,
+                extent_blocks.saturating_sub(offset_in_extent),
+            );
+            if blocks_to_write == 0 {
+                return Ok(0);
+            }
+
+            let mut written = 0usize;
+
+            for i in 0..blocks_to_write {
+                let fs_block_offset = offset_in_extent
+                    .checked_add(i)
+                    .ok_or(Ext4Error::FileTooLarge)?;
+                let fs_block = extent
+                    .start_block
+                    .checked_add(
+                        u64::try_from(fs_block_offset)
+                            .map_err(|_| Ext4Error::FileTooLarge)?,
+                    )
+                    .ok_or(CorruptKind::ExtentBlock(inode.index))?;
+
+                let (block_off, cap) = if i == 0 {
+                    (
+                        offset_in_block,
+                        block_size
+                            .checked_sub(offset_in_block)
+                            .ok_or(CorruptKind::InvalidBlockSize)?,
+                    )
+                } else {
+                    (0usize, block_size)
+                };
+
+                let remaining = buf.len().saturating_sub(written);
+                let take = core::cmp::min(remaining, cap);
+                if take == 0 {
+                    break;
+                }
+
+                let write_end = range_end(written, take)?;
+
+                if block_off == 0 && take == block_size {
+                    ext4.write_to_block(fs_block, 0, &buf[written..write_end])
+                        .await?;
+                    written = write_end;
+                    continue;
+                }
+
+                let mut block_buf = alloc::vec![0u8; block_size];
+                ext4.read_from_block(fs_block, 0, &mut block_buf).await?;
+                let block_end = block_off
+                    .checked_add(take)
+                    .ok_or(CorruptKind::InvalidBlockSize)?;
+                block_buf[block_off..block_end]
+                    .copy_from_slice(&buf[written..write_end]);
+                ext4.write_to_block(fs_block, 0, &block_buf).await?;
+
+                written = write_end;
+            }
+
+            Ok(written)
+        }
+
+        #[expect(clippy::too_many_arguments)]
+        #[maybe_async::maybe_async]
+        async fn write_into_uninitialized_extent(
+            extent_tree: &mut ExtentTree,
+            ext4: &Ext4,
+            inode: &Inode,
+            extent: &Extent,
+            offset_in_extent: usize,
+            run_blocks: usize,
+            buf: &[u8],
+            offset_in_block: usize,
+            block_size: usize,
+        ) -> Result<usize, Ext4Error> {
+            if buf.is_empty() || run_blocks == 0 {
+                return Ok(0);
+            }
+            if offset_in_block >= block_size {
+                return Err(CorruptKind::InvalidBlockSize.into());
+            }
+
+            let extent_blocks = usize::from(extent.num_blocks);
+            let blocks_to_write = core::cmp::min(
+                run_blocks,
+                extent_blocks.saturating_sub(offset_in_extent),
+            );
+            if blocks_to_write == 0 {
+                return Ok(0);
+            }
+
+            let mut written = 0usize;
+            let mut blocks_written = 0usize;
+
+            for i in 0..blocks_to_write {
+                let fs_block_offset = offset_in_extent
+                    .checked_add(i)
+                    .ok_or(Ext4Error::FileTooLarge)?;
+                let fs_block = extent
+                    .start_block
+                    .checked_add(
+                        u64::try_from(fs_block_offset)
+                            .map_err(|_| Ext4Error::FileTooLarge)?,
+                    )
+                    .ok_or(CorruptKind::ExtentBlock(inode.index))?;
+
+                let (block_offset, capacity) = if i == 0 {
+                    (
+                        offset_in_block,
+                        block_size
+                            .checked_sub(offset_in_block)
+                            .ok_or(CorruptKind::InvalidBlockSize)?,
+                    )
+                } else {
+                    (0usize, block_size)
+                };
+
+                let remaining = buf.len().saturating_sub(written);
+                let take = core::cmp::min(remaining, capacity);
+                if take == 0 {
+                    break;
+                }
+
+                let write_end = range_end(written, take)?;
+                let chunk = &buf[written..write_end];
+
+                if block_offset == 0 && take == block_size {
+                    ext4.write_to_block(fs_block, 0, chunk).await?;
+                } else {
+                    let mut block_buf = alloc::vec![0u8; block_size];
+                    let block_end = block_offset
+                        .checked_add(take)
+                        .ok_or(CorruptKind::InvalidBlockSize)?;
+                    block_buf[block_offset..block_end].copy_from_slice(chunk);
+                    ext4.write_to_block(fs_block, 0, &block_buf).await?;
+                }
+
+                written = write_end;
+                blocks_written =
+                    i.checked_add(1).ok_or(Ext4Error::FileTooLarge)?;
+            }
+
+            if blocks_written > 0 {
+                let start_block = extent
+                    .block_within_file
+                    .checked_add(
+                        u32::try_from(offset_in_extent)
+                            .map_err(|_| Ext4Error::FileTooLarge)?,
+                    )
+                    .ok_or(CorruptKind::ExtentBlock(inode.index))?;
+                extent_tree
+                    .mark_initialized(
+                        start_block,
+                        u32::try_from(blocks_written)
+                            .map_err(|_| Ext4Error::FileTooLarge)?,
+                    )
+                    .await?;
+            }
+
+            Ok(written)
+        }
+
+        #[maybe_async::maybe_async]
+        async fn write_into_newly_allocated_extent(
+            ext4: &Ext4,
+            inode: &Inode,
+            extent: &Extent,
+            offset_in_block: usize,
+            buf: &[u8],
+            block_size: usize,
+        ) -> Result<usize, Ext4Error> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            if offset_in_block >= block_size {
+                return Err(CorruptKind::InvalidBlockSize.into());
+            }
+
+            let first_block_capacity = block_size
+                .checked_sub(offset_in_block)
+                .ok_or(CorruptKind::InvalidBlockSize)?;
+            let needed_blocks = if buf.len() <= first_block_capacity {
+                1usize
+            } else {
+                let remaining_after_first = buf
+                    .len()
+                    .checked_sub(first_block_capacity)
+                    .ok_or(Ext4Error::FileTooLarge)?;
+                1usize
+                    .checked_add(remaining_after_first.div_ceil(block_size))
+                    .ok_or(Ext4Error::FileTooLarge)?
+            };
+
+            let extent_blocks = usize::from(extent.num_blocks);
+            let blocks_to_write = core::cmp::min(needed_blocks, extent_blocks);
+            if blocks_to_write == 0 {
+                return Ok(0);
+            }
+
+            let mut written = 0usize;
+
+            for i in 0..blocks_to_write {
+                let fs_block = extent
+                    .start_block
+                    .checked_add(
+                        u64::try_from(i)
+                            .map_err(|_| Ext4Error::FileTooLarge)?,
+                    )
+                    .ok_or(CorruptKind::ExtentBlock(inode.index))?;
+
+                let (block_offset, capacity) = if i == 0 {
+                    (
+                        offset_in_block,
+                        block_size
+                            .checked_sub(offset_in_block)
+                            .ok_or(CorruptKind::InvalidBlockSize)?,
+                    )
+                } else {
+                    (0usize, block_size)
+                };
+
+                let remaining = buf.len().saturating_sub(written);
+                let take = core::cmp::min(remaining, capacity);
+                if take == 0 {
+                    break;
+                }
+
+                let write_end = range_end(written, take)?;
+                let chunk = &buf[written..write_end];
+                let is_full_block_write =
+                    block_offset == 0 && take == block_size;
+
+                if is_full_block_write {
+                    ext4.write_to_block(fs_block, 0, chunk).await?;
+                } else {
+                    let mut block_buf = alloc::vec![0u8; block_size];
+                    let block_end = block_offset
+                        .checked_add(take)
+                        .ok_or(CorruptKind::InvalidBlockSize)?;
+                    block_buf[block_offset..block_end].copy_from_slice(chunk);
+                    ext4.write_to_block(fs_block, 0, &block_buf).await?;
+                }
+
+                written = write_end;
+            }
+
+            Ok(written)
+        }
+
+        let ext4 = self.ext4.clone();
+        let block_size = ext4.0.superblock.block_size();
+        let block_size_u64 = block_size.to_u64();
+        let block_size_usize = block_size.to_usize();
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        let start_block = file_block_from_offset(offset, block_size_u64)?;
+        let mut start_offset_in_block =
+            offset_in_block_usize(offset, block_size_u64)?;
+        let mut bytes_remaining = buf.len();
+        let mut buf_pos = 0usize;
+        let mut current_block = start_block;
+        let mut total_written = 0usize;
+
+        while bytes_remaining > 0 {
+            let opt_extent = self.find_extent(current_block).await?;
+
+            let advanced_bytes = match opt_extent {
+                Some(extent) => {
+                    let extent_block_start = extent.block_within_file;
+                    let extent_block_len = u64::from(extent.num_blocks);
+                    let offset_in_extent = current_block
+                        .checked_sub(extent_block_start)
+                        .ok_or(CorruptKind::ExtentBlock(inode.index))?;
+                    let avail_blocks_in_extent = usize::try_from(
+                        extent_block_len
+                            .checked_sub(u64::from(offset_in_extent))
+                            .ok_or(CorruptKind::ExtentBlock(inode.index))?,
+                    )
+                    .map_err(|_| Ext4Error::FileTooLarge)?;
+
+                    let max_blocks_needed = blocks_needed_for_bytes(
+                        start_offset_in_block,
+                        bytes_remaining,
+                        block_size_usize,
+                    )?;
+                    let run_blocks = core::cmp::min(
+                        avail_blocks_in_extent,
+                        max_blocks_needed,
+                    );
+                    if run_blocks == 0 {
+                        return Err(
+                            CorruptKind::ExtentBlock(inode.index).into()
+                        );
+                    }
+
+                    let want_bytes = bytes_for_blocks(
+                        run_blocks,
+                        start_offset_in_block,
+                        block_size_usize,
+                    )?;
+                    let slice_len = core::cmp::min(want_bytes, bytes_remaining);
+                    let slice_end = range_end(buf_pos, slice_len)?;
+                    let write_buf = &buf[buf_pos..slice_end];
+                    let written_in_run = if extent.is_initialized {
+                        write_into_mapped_initialized_extent(
+                            &ext4,
+                            inode,
+                            &extent,
+                            usize_from_u32(offset_in_extent),
+                            run_blocks,
+                            write_buf,
+                            start_offset_in_block,
+                            block_size_usize,
+                        )
+                        .await?
+                    } else {
+                        let metadata_before =
+                            self.metadata_block_count().await?;
+                        let written = write_into_uninitialized_extent(
+                            self,
+                            &ext4,
+                            inode,
+                            &extent,
+                            usize_from_u32(offset_in_extent),
+                            run_blocks,
+                            write_buf,
+                            start_offset_in_block,
+                            block_size_usize,
+                        )
+                        .await?;
+                        let metadata_after =
+                            self.metadata_block_count().await?;
+                        let metadata_delta = i64::from(metadata_after)
+                            .checked_sub(i64::from(metadata_before))
+                            .ok_or(Ext4Error::FileTooLarge)?;
+                        let new_fs_blocks = if metadata_delta >= 0 {
+                            inode
+                                .fs_blocks(&ext4)?
+                                .checked_add(
+                                    u64::try_from(metadata_delta)
+                                        .map_err(|_| Ext4Error::FileTooLarge)?,
+                                )
+                                .ok_or(Ext4Error::FileTooLarge)?
+                        } else {
+                            inode
+                                .fs_blocks(&ext4)?
+                                .checked_sub(metadata_delta.unsigned_abs())
+                                .ok_or(Ext4Error::FileTooLarge)?
+                        };
+                        inode.set_fs_blocks(new_fs_blocks, &ext4)?;
+                        written
+                    };
+                    total_written = total_written
+                        .checked_add(written_in_run)
+                        .ok_or(Ext4Error::FileTooLarge)?;
+                    written_in_run
+                }
+                None => {
+                    let needed_blocks = blocks_needed_for_bytes(
+                        start_offset_in_block,
+                        bytes_remaining,
+                        block_size_usize,
+                    )?;
+                    if needed_blocks == 0 {
+                        return Err(CorruptKind::InvalidBlockSize.into());
+                    }
+
+                    let to_try = match u16::try_from(needed_blocks) {
+                        Ok(blocks) => blocks.min(MAX_INITIALIZED_EXTENT_BLOCKS),
+                        Err(_) => MAX_INITIALIZED_EXTENT_BLOCKS,
+                    };
+                    let new_extent = Extent::allocate(
+                        inode.index,
+                        current_block,
+                        to_try,
+                        &ext4,
+                    )
+                    .await?;
+                    let tried_blocks = new_extent.num_blocks;
+                    let metadata_before = self.metadata_block_count().await?;
+                    self.insert_extent(new_extent).await?;
+                    let metadata_after = self.metadata_block_count().await?;
+                    let metadata_delta = i64::from(metadata_after)
+                        .checked_sub(i64::from(metadata_before))
+                        .ok_or(Ext4Error::FileTooLarge)?;
+                    let data_delta = i64::from(tried_blocks);
+                    let total_delta = data_delta
+                        .checked_add(metadata_delta)
+                        .ok_or(Ext4Error::FileTooLarge)?;
+                    let new_fs_blocks = if total_delta >= 0 {
+                        inode
+                            .fs_blocks(&ext4)?
+                            .checked_add(
+                                u64::try_from(total_delta)
+                                    .map_err(|_| Ext4Error::FileTooLarge)?,
+                            )
+                            .ok_or(Ext4Error::FileTooLarge)?
+                    } else {
+                        inode
+                            .fs_blocks(&ext4)?
+                            .checked_sub(total_delta.unsigned_abs())
+                            .ok_or(Ext4Error::FileTooLarge)?
+                    };
+                    inode.set_fs_blocks(new_fs_blocks, &ext4)?;
+                    let want_bytes = bytes_for_blocks(
+                        usize::from(tried_blocks),
+                        start_offset_in_block,
+                        block_size_usize,
+                    )?;
+                    let slice_len = core::cmp::min(want_bytes, bytes_remaining);
+                    let slice_end = range_end(buf_pos, slice_len)?;
+                    let written_in_run = write_into_newly_allocated_extent(
+                        &ext4,
+                        inode,
+                        &new_extent,
+                        start_offset_in_block,
+                        &buf[buf_pos..slice_end],
+                        block_size_usize,
+                    )
+                    .await?;
+                    total_written = total_written
+                        .checked_add(written_in_run)
+                        .ok_or(Ext4Error::FileTooLarge)?;
+                    written_in_run
+                }
+            };
+
+            if advanced_bytes == 0 {
+                return Err(CorruptKind::ExtentBlock(inode.index).into());
+            }
+            bytes_remaining = bytes_remaining
+                .checked_sub(advanced_bytes)
+                .ok_or(Ext4Error::FileTooLarge)?;
+            buf_pos = buf_pos
+                .checked_add(advanced_bytes)
+                .ok_or(Ext4Error::FileTooLarge)?;
+            let current_offset = add_to_file_offset(offset, buf_pos)?;
+            current_block =
+                file_block_from_offset(current_offset, block_size_u64)?;
+            start_offset_in_block =
+                offset_in_block_usize(current_offset, block_size_u64)?;
+
+            self.try_merge_adjacent(current_block).await?;
+        }
+
+        let new_size = add_to_file_offset(offset, total_written)?;
+        inode.set_size_in_bytes(max(inode.size_in_bytes(), new_size));
+        inode.set_inline_data(self.to_bytes()?);
+        inode.write(&ext4).await?;
+
+        Ok(total_written)
+    }
+
+    #[maybe_async::maybe_async]
+    pub(crate) async fn claim_uninitialized_blocks(
+        &mut self,
+        inode: &mut Inode,
+        start_block: u32,
+        num_blocks: u32,
+    ) -> Result<(), Ext4Error> {
+        if num_blocks == 0 {
+            return Ok(());
+        }
+
+        let metadata_before = self.metadata_block_count().await?;
+        let claimed = self
+            .claim_uninitialized_range(start_block, num_blocks)
+            .await?;
+        if claimed == 0 {
+            return Ok(());
+        }
+        let metadata_after = self.metadata_block_count().await?;
+        let metadata_delta = i64::from(metadata_after)
+            .checked_sub(i64::from(metadata_before))
+            .ok_or(CorruptKind::InodeBlockCount(inode.index))?;
+        let total_delta = i64::from(claimed)
+            .checked_add(metadata_delta)
+            .ok_or(CorruptKind::InodeBlockCount(inode.index))?;
+        let fs_blocks =
+            if total_delta >= 0 {
+                inode
+                    .fs_blocks(&self.ext4)?
+                    .checked_add(u64::try_from(total_delta).map_err(|_| {
+                        CorruptKind::InodeBlockCount(inode.index)
+                    })?)
+                    .ok_or(CorruptKind::InodeBlockCount(inode.index))?
+            } else {
+                inode
+                    .fs_blocks(&self.ext4)?
+                    .checked_sub(total_delta.unsigned_abs())
+                    .ok_or(CorruptKind::InodeBlockCount(inode.index))?
+            };
+        inode.set_fs_blocks(fs_blocks, &self.ext4)?;
+        inode.set_inline_data(self.to_bytes()?);
+        inode.write(&self.ext4).await?;
+        Ok(())
+    }
+
+    #[maybe_async::maybe_async]
+    pub(crate) async fn free_uninitialized_blocks(
+        &mut self,
+        inode: &mut Inode,
+        start_block: u32,
+        num_blocks: u32,
+    ) -> Result<(), Ext4Error> {
+        if num_blocks == 0 {
+            return Ok(());
+        }
+
+        let metadata_before = self.metadata_block_count().await?;
+        let freed = self
+            .free_uninitialized_range(start_block, num_blocks)
+            .await?;
+        if freed.is_empty() {
+            return Ok(());
+        }
+        let metadata_after = self.metadata_block_count().await?;
+
+        inode.set_inline_data(self.to_bytes()?);
+
+        let freed_data_blocks =
+            free_freed_ranges(&self.ext4, inode.index, freed).await?;
+        let metadata_freed = u64::from(metadata_before)
+            .checked_sub(u64::from(metadata_after))
+            .ok_or(CorruptKind::InodeBlockCount(inode.index))?;
+        let fs_blocks = inode
+            .fs_blocks(&self.ext4)?
+            .checked_sub(freed_data_blocks)
+            .ok_or(CorruptKind::InodeBlockCount(inode.index))?
+            .checked_sub(metadata_freed)
+            .ok_or(CorruptKind::InodeBlockCount(inode.index))?;
+        inode.set_fs_blocks(fs_blocks, &self.ext4)?;
+        inode.write(&self.ext4).await?;
+        Ok(())
+    }
+
+    #[maybe_async::maybe_async]
+    pub(crate) async fn truncate(
+        &mut self,
+        inode: &mut Inode,
+        new_size: u64,
+    ) -> Result<(), Ext4Error> {
+        let old_size = inode.size_in_bytes();
+        if new_size == old_size {
+            return Ok(());
+        }
+
+        if new_size > old_size {
+            inode.set_size_in_bytes(new_size);
+            inode.write(&self.ext4).await?;
+            return Ok(());
+        }
+
+        let block_size_u64 = self.ext4.0.superblock.block_size().to_u64();
+        let old_blocks = old_size.div_ceil(block_size_u64);
+        let new_blocks = new_size.div_ceil(block_size_u64);
+
+        if new_blocks < old_blocks {
+            let drop_from = FileBlockIndex::try_from(new_blocks)
+                .map_err(|_| Ext4Error::FileTooLarge)?;
+            let drop_count = u32::try_from(
+                old_blocks
+                    .checked_sub(new_blocks)
+                    .ok_or(Ext4Error::FileTooLarge)?,
+            )
+            .map_err(|_| Ext4Error::FileTooLarge)?;
+
+            let metadata_before = self.metadata_block_count().await?;
+            let freed = self.remove_extent_range(drop_from, drop_count).await?;
+            let metadata_after = self.metadata_block_count().await?;
+
+            inode.set_inline_data(self.to_bytes()?);
+
+            let freed_data_blocks =
+                free_freed_ranges(&self.ext4, inode.index, freed).await?;
+            let metadata_freed = u64::from(metadata_before)
+                .checked_sub(u64::from(metadata_after))
+                .ok_or(CorruptKind::InodeBlockCount(inode.index))?;
+            let fs_blocks = inode
+                .fs_blocks(&self.ext4)?
+                .checked_sub(freed_data_blocks)
+                .ok_or(CorruptKind::InodeBlockCount(inode.index))?
+                .checked_sub(metadata_freed)
+                .ok_or(CorruptKind::InodeBlockCount(inode.index))?;
+            inode.set_fs_blocks(fs_blocks, &self.ext4)?;
+        }
+
+        inode.set_size_in_bytes(new_size);
+        inode.write(&self.ext4).await?;
+        Ok(())
     }
 }
 
