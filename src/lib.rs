@@ -1215,6 +1215,64 @@ impl Ext4 {
             .map(|v| v.1)
     }
 
+    /// Check if `path` exists.
+    ///
+    /// Returns `Ok(true)` if `path` exists, or `Ok(false)` if it does
+    /// not exist.
+    ///
+    /// # Errors
+    ///
+    /// An error will be returned if:
+    /// * `path` is not absolute.
+    ///
+    /// This is not an exhaustive list of errors, see the
+    /// [crate documentation](crate#errors).
+    #[maybe_async::maybe_async]
+    pub async fn exists<'p, P>(&self, path: P) -> Result<bool, Ext4Error>
+    where
+        P: TryInto<Path<'p>>,
+    {
+        #[maybe_async::maybe_async]
+        async fn inner(fs: &Ext4, path: Path<'_>) -> Result<bool, Ext4Error> {
+            match fs.path_to_inode(path, FollowSymlinks::All).await {
+                Ok(_) => Ok(true),
+                Err(Ext4Error::NotFound) => Ok(false),
+                Err(err) => Err(err),
+            }
+        }
+
+        inner(self, path.try_into().map_err(|_| Ext4Error::MalformedPath)?)
+            .await
+    }
+
+    /// Get [`Metadata`] for `path`.
+    ///
+    /// # Errors
+    ///
+    /// An error will be returned if:
+    /// * `path` is not absolute.
+    /// * `path` does not exist.
+    ///
+    /// This is not an exhaustive list of errors, see the
+    /// [crate documentation](crate#errors).
+    #[maybe_async::maybe_async]
+    pub async fn metadata<'p, P>(&self, path: P) -> Result<Metadata, Ext4Error>
+    where
+        P: TryInto<Path<'p>>,
+    {
+        #[maybe_async::maybe_async]
+        async fn inner(
+            fs: &Ext4,
+            path: Path<'_>,
+        ) -> Result<Metadata, Ext4Error> {
+            let inode = fs.path_to_inode(path, FollowSymlinks::All).await?;
+            Ok(inode.metadata())
+        }
+
+        inner(self, path.try_into().map_err(|_| Ext4Error::MalformedPath)?)
+            .await
+    }
+
     /// Open the file at `path`.
     ///
     /// # Errors
@@ -1272,29 +1330,34 @@ impl Ext4 {
             .await
     }
 
-    /// Read the entire contents of a file as a string.
+    /// Get an iterator over the entries in a directory.
     ///
     /// # Errors
     ///
     /// An error will be returned if:
     /// * `path` is not absolute.
     /// * `path` does not exist.
-    /// * `path` is a directory or special file type.
+    /// * `path` is not a directory.
     ///
     /// This is not an exhaustive list of errors, see the
     /// [crate documentation](crate#errors).
     #[maybe_async::maybe_async]
-    pub async fn read_to_string<'p, P>(
-        &self,
-        path: P,
-    ) -> Result<String, Ext4Error>
+    pub async fn read_dir<'p, P>(&self, path: P) -> Result<ReadDir, Ext4Error>
     where
         P: TryInto<Path<'p>>,
     {
         #[maybe_async::maybe_async]
-        async fn inner(fs: &Ext4, path: Path<'_>) -> Result<String, Ext4Error> {
-            let content = fs.read(path).await?;
-            String::from_utf8(content).map_err(|_| Ext4Error::NotUtf8)
+        async fn inner(
+            fs: &Ext4,
+            path: Path<'_>,
+        ) -> Result<ReadDir, Ext4Error> {
+            let inode = fs.path_to_inode(path, FollowSymlinks::All).await?;
+
+            if !inode.file_type().is_dir() {
+                return Err(Ext4Error::NotADirectory);
+            }
+
+            ReadDir::new(fs.clone(), &inode, path.into())
         }
 
         inner(self, path.try_into().map_err(|_| Ext4Error::MalformedPath)?)
@@ -1335,92 +1398,29 @@ impl Ext4 {
             .await
     }
 
-    /// Get an iterator over the entries in a directory.
+    /// Read the entire contents of a file as a string.
     ///
     /// # Errors
     ///
     /// An error will be returned if:
     /// * `path` is not absolute.
     /// * `path` does not exist.
-    /// * `path` is not a directory.
+    /// * `path` is a directory or special file type.
     ///
     /// This is not an exhaustive list of errors, see the
     /// [crate documentation](crate#errors).
     #[maybe_async::maybe_async]
-    pub async fn read_dir<'p, P>(&self, path: P) -> Result<ReadDir, Ext4Error>
+    pub async fn read_to_string<'p, P>(
+        &self,
+        path: P,
+    ) -> Result<String, Ext4Error>
     where
         P: TryInto<Path<'p>>,
     {
         #[maybe_async::maybe_async]
-        async fn inner(
-            fs: &Ext4,
-            path: Path<'_>,
-        ) -> Result<ReadDir, Ext4Error> {
-            let inode = fs.path_to_inode(path, FollowSymlinks::All).await?;
-
-            if !inode.file_type().is_dir() {
-                return Err(Ext4Error::NotADirectory);
-            }
-
-            ReadDir::new(fs.clone(), &inode, path.into())
-        }
-
-        inner(self, path.try_into().map_err(|_| Ext4Error::MalformedPath)?)
-            .await
-    }
-
-    /// Check if `path` exists.
-    ///
-    /// Returns `Ok(true)` if `path` exists, or `Ok(false)` if it does
-    /// not exist.
-    ///
-    /// # Errors
-    ///
-    /// An error will be returned if:
-    /// * `path` is not absolute.
-    ///
-    /// This is not an exhaustive list of errors, see the
-    /// [crate documentation](crate#errors).
-    #[maybe_async::maybe_async]
-    pub async fn exists<'p, P>(&self, path: P) -> Result<bool, Ext4Error>
-    where
-        P: TryInto<Path<'p>>,
-    {
-        #[maybe_async::maybe_async]
-        async fn inner(fs: &Ext4, path: Path<'_>) -> Result<bool, Ext4Error> {
-            match fs.path_to_inode(path, FollowSymlinks::All).await {
-                Ok(_) => Ok(true),
-                Err(Ext4Error::NotFound) => Ok(false),
-                Err(err) => Err(err),
-            }
-        }
-
-        inner(self, path.try_into().map_err(|_| Ext4Error::MalformedPath)?)
-            .await
-    }
-
-    /// Get [`Metadata`] for `path`.
-    ///
-    /// # Errors
-    ///
-    /// An error will be returned if:
-    /// * `path` is not absolute.
-    /// * `path` does not exist.
-    ///
-    /// This is not an exhaustive list of errors, see the
-    /// [crate documentation](crate#errors).
-    #[maybe_async::maybe_async]
-    pub async fn metadata<'p, P>(&self, path: P) -> Result<Metadata, Ext4Error>
-    where
-        P: TryInto<Path<'p>>,
-    {
-        #[maybe_async::maybe_async]
-        async fn inner(
-            fs: &Ext4,
-            path: Path<'_>,
-        ) -> Result<Metadata, Ext4Error> {
-            let inode = fs.path_to_inode(path, FollowSymlinks::All).await?;
-            Ok(inode.metadata())
+        async fn inner(fs: &Ext4, path: Path<'_>) -> Result<String, Ext4Error> {
+            let content = fs.read(path).await?;
+            String::from_utf8(content).map_err(|_| Ext4Error::NotUtf8)
         }
 
         inner(self, path.try_into().map_err(|_| Ext4Error::MalformedPath)?)
