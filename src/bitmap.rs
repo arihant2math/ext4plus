@@ -6,6 +6,14 @@ use crate::util::usize_from_u32;
 use alloc::vec;
 use core::ops::RangeBounds;
 
+fn calc_index(byte_index: u32, bit_index: u32) -> u32 {
+    byte_index
+        .checked_mul(8)
+        .unwrap()
+        .checked_add(bit_index)
+        .unwrap()
+}
+
 pub(crate) struct BitmapHandle {
     block: FsBlockIndex,
     is_inode_bitmap: bool,
@@ -76,11 +84,7 @@ impl BitmapHandle {
                 if dst[0] != 0 {
                     for bit_index in 0..8 {
                         if (dst[0] & (1 << bit_index)) != 0 {
-                            let index = byte_index
-                                .checked_mul(8)
-                                .unwrap()
-                                .checked_add(bit_index)
-                                .unwrap();
+                            let index = calc_index(byte_index, bit_index);
                             if !range.contains(&(index)) {
                                 continue;
                             }
@@ -93,11 +97,7 @@ impl BitmapHandle {
                 if dst[0] != 0xFF {
                     for bit_index in 0..8 {
                         if (dst[0] & (1 << bit_index)) == 0 {
-                            let index = byte_index
-                                .checked_mul(8)
-                                .unwrap()
-                                .checked_add(bit_index)
-                                .unwrap();
+                            let index = calc_index(byte_index, bit_index);
                             if !range.contains(&(index)) {
                                 continue;
                             }
@@ -127,11 +127,8 @@ impl BitmapHandle {
                 .await?;
             for bit_index in 0..8 {
                 if ((dst[0] & (1 << bit_index)) != 0) == value {
-                    let index = byte_index
-                        .checked_mul(8)
-                        .unwrap()
-                        .checked_add(bit_index)
-                        .unwrap();
+                    let index = calc_index(byte_index, bit_index);
+
                     if !range.contains(&(index)) {
                         count = 0;
                         continue;
@@ -168,7 +165,7 @@ impl BitmapHandle {
         let bytes_to_hash = if self.is_inode_bitmap {
             let inodes_per_group =
                 ext4.0.superblock.inodes_per_block_group().get();
-            ((usize_from_u32(inodes_per_group)).checked_add(7).unwrap()) / 8
+            (usize_from_u32(inodes_per_group).checked_add(7).unwrap()) / 8
         } else {
             ext4.0.superblock.block_size().to_usize()
         };
