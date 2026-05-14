@@ -10,7 +10,7 @@
 use crate::block_index::FsBlockIndex;
 use crate::block_size::BlockSize;
 use crate::dir_entry::DirEntryNameError;
-use crate::features::IncompatibleFeatures;
+use crate::features::{FilesystemFeature, IncompatibleFeatures};
 use crate::inode::{InodeIndex, InodeMode};
 use alloc::boxed::Box;
 use core::error::Error;
@@ -60,6 +60,9 @@ pub enum Ext4Error {
     /// Data cannot be converted into a valid path.
     MalformedPath,
 
+    /// Data cannot be converted into a valid extended attribute name.
+    InvalidXattrName,
+
     /// Path is too long.
     ///
     /// Maximum path length is not strictly enforced by this library for
@@ -83,6 +86,9 @@ pub enum Ext4Error {
         /// Underlying error.
         BoxedError,
     ),
+
+    /// The operation is not supported by the filesystem
+    UnsupportedOperation(FilesystemFeature),
 
     /// The filesystem is not supported by this library. This does not
     /// indicate a problem with the filesystem, or with the calling
@@ -132,6 +138,9 @@ impl Display for Ext4Error {
             }
             Self::NotUtf8 => write!(f, "data is not utf-8"),
             Self::MalformedPath => write!(f, "data is not a valid path"),
+            Self::InvalidXattrName => {
+                write!(f, "data is not a valid extended attribute name")
+            }
             Self::PathTooLong => write!(f, "path is too long"),
             Self::TooManySymlinks => {
                 write!(f, "too many levels of symbolic links")
@@ -140,6 +149,9 @@ impl Display for Ext4Error {
             // TODO: if the `Error` trait ever makes it into core, stop
             // printing `err` here and return it via `Error::source` instead.
             Self::Io(err) => write!(f, "io error: {err}"),
+            Self::UnsupportedOperation(feat) => {
+                write!(f, "unsupported operation due to {feat:?}")
+            }
             Self::Incompatible(i) => write!(f, "incompatible filesystem: {i}"),
             Self::Corrupt(c) => write!(f, "corrupt filesystem: {c}"),
             Self::Readonly => write!(f, "filesystem is read-only"),
@@ -163,11 +175,13 @@ impl From<Ext4Error> for std::io::Error {
         match e {
             Ext4Error::IsASpecialFile
             | Ext4Error::MalformedPath
+            | Ext4Error::InvalidXattrName
             | Ext4Error::NotASymlink
             | Ext4Error::NotAbsolute => InvalidInput.into(),
 
             Ext4Error::Corrupt(_)
             | Ext4Error::Incompatible(_)
+            | Ext4Error::UnsupportedOperation(_)
             | Ext4Error::PathTooLong
             | Ext4Error::TooManySymlinks
             | Ext4Error::DotEntry => Self::other(e),
@@ -297,6 +311,12 @@ pub(crate) enum CorruptKind {
     /// tag.
     JournalDescriptorBlockTruncated,
 
+    /// MMP magic is invalid.
+    MmpMagic,
+
+    /// MMP checksum is invalid.
+    MmpChecksum,
+
     /// An inode's checksum is invalid.
     InodeChecksum(InodeIndex),
 
@@ -319,6 +339,9 @@ pub(crate) enum CorruptKind {
 
     /// An inode's file type is invalid.
     InodeFileType { inode: InodeIndex, mode: InodeMode },
+
+    /// An inode's stored block count is invalid.
+    InodeBlockCount(InodeIndex),
 
     /// The target of a symlink is not a valid path.
     SymlinkTarget(InodeIndex),
@@ -343,6 +366,9 @@ pub(crate) enum CorruptKind {
 
     /// An extent points to an invalid block.
     ExtentBlock(InodeIndex),
+
+    /// Extended attribute data is invalid.
+    Xattr(InodeIndex),
 
     /// A block in the extent is larger than 48 bits
     ExtentBlockOverflow(u64),
@@ -493,6 +519,8 @@ impl Display for CorruptKind {
             Self::JournalDescriptorBlockTruncated => {
                 write!(f, "journal descriptor block is truncated")
             }
+            Self::MmpMagic => write!(f, "MMP magic is invalid"),
+            Self::MmpChecksum => write!(f, "MMP checksum is invalid"),
             Self::InodeChecksum(inode) => {
                 write!(f, "invalid checksum for inode {inode}")
             }
@@ -519,6 +547,9 @@ impl Display for CorruptKind {
                     mode = mode.bits()
                 )
             }
+            Self::InodeBlockCount(inode) => {
+                write!(f, "inode {inode} has an invalid block count")
+            }
             Self::SymlinkTarget(inode) => {
                 write!(f, "inode {inode} has an invalid symlink path")
             }
@@ -543,6 +574,9 @@ impl Display for CorruptKind {
             }
             Self::ExtentBlock(inode) => {
                 write!(f, "extent in inode {inode} points to an invalid block")
+            }
+            Self::Xattr(inode) => {
+                write!(f, "extended attribute data in inode {inode} is invalid")
             }
             Self::ExtentBlockOverflow(block) => {
                 write!(f, "extent block {block} is larger than 48 bits")
@@ -675,7 +709,6 @@ pub(crate) enum IncompatibleKind {
     ),
 
     /// One or more unsupported features are present.
-    #[allow(clippy::enum_variant_names)]
     UnsupportedFeatures(
         /// The unsupported features.
         IncompatibleFeatures,
@@ -706,7 +739,6 @@ pub(crate) enum IncompatibleKind {
     ),
 
     /// One or more unsupported journal features are present.
-    #[allow(clippy::enum_variant_names)]
     UnsupportedJournalFeatures(
         /// The unsupported feature bits.
         u32,

@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+## 0.1.0-rc.1
+
+- ADDED: Full htree directory support, including expanding when needed, etc.
+- ADDED: Support for extents with internal nodes, allowing for much larger files when the `extents` file system feature is enabled.
+- ADDED: `File::claim_uninitialized_blocks`, `File::free_uninitialized_blocks` and `claim_uninitialized_blocks`, `free_uninitialized_blocks`.
+- FIXED: Reduces the amount of writes needed for block operations when using file objects
+
+## 0.1.0-beta.4
+
+- ADDED: `Ext4::load_with_writer` to allow loading files with write-back.
+- FIXED: Greatly reduce unwrapping
+- FIXED: indirect block initialization
+
+## 0.1.0-beta.3
+
+- Expose `Superblock::num_block_groups`, `Superblock::inodes_per_block_group`, and `Superblock::write`.
+- Add `Superblock::creator_os`, `Superblock::mount_time`, and `Superblock::mkfs_time`.
+- Ensure proper xattr feature exists in filesystem before allowing xattr operations.
+- Add `FilesystemFeatures` struct to get a more detailed view of the features of the filesystem, exposes struct via `Superblock::features`.
+- Fix edge cases with reading/writing traits
+
+## 0.1.0-beta.2
+
+- Add `multi-threading` feature flag so that thread safety can be opted out for single-threaded environments.
+- Add xattr support: `Ext4::get_xattr`, `Ext4::set_xattr`, `Ext4::remove_xattr`, and `Ext4::list_xattrs` as well as `Inode` methods.
+    - Doesn't support very large amounts of xattrs
+
 ## 0.1.0-beta.1
 
 - BREAKING: Require mutable dir for `Ext4::symlink` and mutable self for `Dir::link` and `Dir::unlink`.

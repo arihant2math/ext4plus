@@ -1,12 +1,10 @@
-#![allow(unused)]
-
-use crate::{Ext4, Ext4Error, Inode, InodeFlags};
-
 use crate::block_index::{FileBlockIndex, FsBlockIndex};
-use crate::inode::InodeIndex;
+use crate::features::FilesystemFeature;
+use crate::{Ext4, Ext4Error, IncompatibleFeatures, Inode, InodeFlags};
 
 pub(crate) mod block_map;
 pub(crate) mod extent_tree;
+mod utils;
 
 pub(crate) enum FileBlocks {
     BlockMap(block_map::BlockMap),
@@ -48,19 +46,6 @@ impl FileBlocks {
     }
 
     #[maybe_async::maybe_async]
-    pub(crate) async fn get_block(
-        &self,
-        block_index: FileBlockIndex,
-    ) -> Result<FsBlockIndex, Ext4Error> {
-        match self {
-            Self::ExtentTree(extent_tree) => {
-                extent_tree.get_block(block_index).await
-            }
-            Self::BlockMap(block_map) => block_map.get_block(block_index).await,
-        }
-    }
-
-    #[maybe_async::maybe_async]
     pub(crate) async fn get_block_run(
         &self,
         block_index: FileBlockIndex,
@@ -75,22 +60,86 @@ impl FileBlocks {
             }
         }
     }
-
-    /// Allocate a block for the file at `block_index`,
-    /// and return the index of the allocated block and the number of metadata blocks allocated.
     #[maybe_async::maybe_async]
-    pub(crate) async fn allocate_block(
+    pub(crate) async fn write_at(
         &mut self,
-        block_index: FileBlockIndex,
-        inode_index: InodeIndex,
-    ) -> Result<(FsBlockIndex, u32), Ext4Error> {
+        inode: &mut Inode,
+        buf: &[u8],
+        offset: u64,
+    ) -> Result<usize, Ext4Error> {
+        if inode.flags().contains(InodeFlags::IMMUTABLE) {
+            return Err(Ext4Error::Readonly);
+        }
+
         match self {
             Self::ExtentTree(extent_tree) => {
-                extent_tree.allocate_block(block_index, inode_index).await
+                extent_tree.write_at(inode, buf, offset).await
             }
             Self::BlockMap(block_map) => {
-                block_map.allocate_block(block_index, inode_index).await
+                block_map.write_at(inode, buf, offset).await
             }
+        }
+    }
+
+    #[maybe_async::maybe_async]
+    pub(crate) async fn truncate(
+        &mut self,
+        inode: &mut Inode,
+        new_size: u64,
+    ) -> Result<(), Ext4Error> {
+        match self {
+            Self::ExtentTree(extent_tree) => {
+                extent_tree.truncate(inode, new_size).await
+            }
+            Self::BlockMap(block_map) => {
+                block_map.truncate(inode, new_size).await
+            }
+        }
+    }
+
+    #[maybe_async::maybe_async]
+    pub(crate) async fn claim_uninitialized_blocks(
+        &mut self,
+        inode: &mut Inode,
+        start_block: u32,
+        num_blocks: u32,
+    ) -> Result<(), Ext4Error> {
+        if inode.flags().contains(InodeFlags::IMMUTABLE) {
+            return Err(Ext4Error::Readonly);
+        }
+
+        match self {
+            Self::ExtentTree(extent_tree) => {
+                extent_tree
+                    .claim_uninitialized_blocks(inode, start_block, num_blocks)
+                    .await
+            }
+            Self::BlockMap(_) => Err(Ext4Error::UnsupportedOperation(
+                FilesystemFeature::Incompatible(IncompatibleFeatures::EXTENTS),
+            )),
+        }
+    }
+
+    #[maybe_async::maybe_async]
+    pub(crate) async fn free_uninitialized_blocks(
+        &mut self,
+        inode: &mut Inode,
+        start_block: u32,
+        num_blocks: u32,
+    ) -> Result<(), Ext4Error> {
+        if inode.flags().contains(InodeFlags::IMMUTABLE) {
+            return Err(Ext4Error::Readonly);
+        }
+
+        match self {
+            Self::ExtentTree(extent_tree) => {
+                extent_tree
+                    .free_uninitialized_blocks(inode, start_block, num_blocks)
+                    .await
+            }
+            Self::BlockMap(_) => Err(Ext4Error::UnsupportedOperation(
+                FilesystemFeature::Incompatible(IncompatibleFeatures::EXTENTS),
+            )),
         }
     }
 }

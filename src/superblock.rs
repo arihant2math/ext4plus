@@ -7,19 +7,48 @@
 // except according to those terms.
 //! Superblock structure and related functionality.
 
+use crate::block_index::FsBlockIndex;
 use crate::block_size::BlockSize;
 use crate::checksum::Checksum;
 use crate::error::{CorruptKind, Ext4Error, IncompatibleKind};
 use crate::features::{
-    CompatibleFeatures, IncompatibleFeatures, ReadOnlyCompatibleFeatures,
+    CompatibleFeatures, FilesystemFeatures, IncompatibleFeatures,
+    ReadOnlyCompatibleFeatures,
 };
 use crate::inode::InodeIndex;
 use crate::util::{
-    read_u16le, read_u32le, u64_from_hilo, u64_to_hilo, write_u32le,
+    read_u16le, read_u32le, read_u64le, u64_from_hilo, u64_to_hilo, write_u32le,
 };
 use crate::{Ext4, Label, Uuid};
+use core::fmt::Display;
 use core::num::NonZeroU32;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::time::Duration;
+
+/// Creator of the filesystem
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CreatorOS(u32);
+
+impl CreatorOS {
+    /// Numerical ID of creator OS
+    #[must_use]
+    pub fn value(&self) -> u32 {
+        self.0
+    }
+}
+
+impl Display for CreatorOS {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.value() {
+            0 => write!(f, "Linux"),
+            1 => write!(f, "Hurd"),
+            2 => write!(f, "Masix"),
+            3 => write!(f, "FreeBSD"),
+            4 => write!(f, "Lites"),
+            other => write!(f, "FsCreator({})", other),
+        }
+    }
+}
 
 /// Information about the filesystem.
 #[derive(Debug)]
@@ -33,8 +62,7 @@ pub struct Superblock {
     inodes_per_block_group: NonZeroU32,
     block_group_descriptor_size: u16,
     num_block_groups: u32,
-    incompatible_features: IncompatibleFeatures,
-    read_only_compatible_features: ReadOnlyCompatibleFeatures,
+    features: FilesystemFeatures,
     min_extra_isize: u16,
     checksum_seed: u32,
     htree_hash_seed: [u32; 4],
@@ -55,9 +83,7 @@ impl PartialEq for Superblock {
             && self.block_group_descriptor_size
                 == other.block_group_descriptor_size
             && self.num_block_groups == other.num_block_groups
-            && self.incompatible_features == other.incompatible_features
-            && self.read_only_compatible_features
-                == other.read_only_compatible_features
+            && self.features == other.features
             && self.min_extra_isize == other.min_extra_isize
             && self.checksum_seed == other.checksum_seed
             && self.htree_hash_seed == other.htree_hash_seed
@@ -218,8 +244,11 @@ impl Superblock {
             inodes_per_block_group,
             block_group_descriptor_size,
             num_block_groups,
-            incompatible_features,
-            read_only_compatible_features,
+            features: FilesystemFeatures {
+                compatible: compatible_features,
+                incompatible: incompatible_features,
+                read_only_compatible: read_only_compatible_features,
+            },
             min_extra_isize: s_min_extra_isize,
             checksum_seed,
             htree_hash_seed: s_hash_seed,
@@ -231,21 +260,22 @@ impl Superblock {
     }
 
     pub(crate) fn needs_recovery(&self) -> bool {
-        self.incompatible_features
+        self.incompatible_features()
             .contains(IncompatibleFeatures::RECOVERY)
     }
 
     pub(crate) fn supports_writes(&self) -> bool {
         check_read_only_compat_features(
-            self.read_only_compatible_features.bits(),
+            self.read_only_compatible_features().bits(),
         )
     }
 
     pub(crate) fn clear_recovery(&mut self) {
-        self.incompatible_features
+        self.features
+            .incompatible
             .remove(IncompatibleFeatures::RECOVERY);
         self.journal_inode = None;
-        write_u32le(&mut self.data, 0x60, self.incompatible_features.bits());
+        write_u32le(&mut self.data, 0x60, self.features.incompatible.bits());
     }
 
     fn to_bytes(&self) -> [u8; Self::SIZE_IN_BYTES_ON_DISK] {
@@ -262,7 +292,7 @@ impl Superblock {
         write_u32le(&mut data, 0x158, free_blocks_hi);
 
         if self
-            .read_only_compatible_features
+            .read_only_compatible_features()
             .contains(ReadOnlyCompatibleFeatures::METADATA_CHECKSUMS)
         {
             let mut checksum = Checksum::new();
@@ -273,8 +303,9 @@ impl Superblock {
         data
     }
 
+    /// Write any superblock changes back to the disk
     #[maybe_async::maybe_async]
-    pub(crate) async fn write(&self, ext4: &Ext4) -> Result<(), Ext4Error> {
+    pub async fn write(&self, ext4: &Ext4) -> Result<(), Ext4Error> {
         let data = self.to_bytes();
         // start byte
         let offset = 1024;
@@ -301,7 +332,8 @@ impl Superblock {
         self.inode_size
     }
 
-    pub(crate) fn inodes_per_block_group(&self) -> NonZeroU32 {
+    /// Number of inodes in a block group, some could be unused.
+    pub fn inodes_per_block_group(&self) -> NonZeroU32 {
         self.inodes_per_block_group
     }
 
@@ -309,18 +341,31 @@ impl Superblock {
         self.block_group_descriptor_size
     }
 
-    pub(crate) fn num_block_groups(&self) -> u32 {
+    /// Number of block groups in this filesystem
+    pub fn num_block_groups(&self) -> u32 {
         self.num_block_groups
     }
 
-    pub(crate) fn incompatible_features(&self) -> IncompatibleFeatures {
-        self.incompatible_features
+    /// FS features
+    pub fn features(&self) -> FilesystemFeatures {
+        self.features
     }
 
+    /// FS compat features
+    pub(crate) fn compatible_features(&self) -> CompatibleFeatures {
+        self.features.compatible()
+    }
+
+    /// FS incompat features
+    pub(crate) fn incompatible_features(&self) -> IncompatibleFeatures {
+        self.features.incompatible()
+    }
+
+    /// FS ro-compat features
     pub(crate) fn read_only_compatible_features(
         &self,
     ) -> ReadOnlyCompatibleFeatures {
-        self.read_only_compatible_features
+        self.features.read_only_compatible()
     }
 
     pub(crate) fn min_extra_isize(&self) -> u16 {
@@ -380,6 +425,51 @@ impl Superblock {
     pub(crate) fn dec_free_blocks_count(&self, amount: u64) {
         self.free_blocks_count.fetch_sub(amount, Ordering::Relaxed);
     }
+
+    /// Mount times in seconds from epoch
+    pub fn mount_time(&self) -> Duration {
+        let m_time = read_u32le(&self.data, 0x2C);
+        let m_time_high = if self
+            .incompatible_features()
+            .contains(IncompatibleFeatures::IS_64BIT)
+        {
+            self.data[0x275]
+        } else {
+            0
+        };
+        let mtime = u64::from(m_time)
+            .checked_add(u64::from(m_time_high) << 32)
+            .unwrap();
+        Duration::from_secs(mtime)
+    }
+
+    /// MKFS time, in seconds from epoch
+    pub fn mkfs_time(&self) -> Duration {
+        let m_time = read_u32le(&self.data, 0x108);
+        let m_time_high = if self
+            .incompatible_features()
+            .contains(IncompatibleFeatures::IS_64BIT)
+        {
+            self.data[0x276]
+        } else {
+            0
+        };
+        let mtime = u64::from(m_time)
+            .checked_add(u64::from(m_time_high) << 32)
+            .unwrap();
+        Duration::from_secs(mtime)
+    }
+
+    /// Get the creator OS
+    pub fn creator_os(&self) -> CreatorOS {
+        let creator_os = read_u32le(&self.data, 0x48);
+        CreatorOS(creator_os)
+    }
+
+    /// Get MMP block
+    pub fn mmp_block(&self) -> FsBlockIndex {
+        read_u64le(&self.data, 0x168)
+    }
 }
 
 fn check_incompat_features(
@@ -400,7 +490,6 @@ fn check_incompat_features(
     let disallowed_features = IncompatibleFeatures::COMPRESSION
         | IncompatibleFeatures::SEPARATE_JOURNAL_DEVICE
         | IncompatibleFeatures::META_BLOCK_GROUPS
-        | IncompatibleFeatures::MULTIPLE_MOUNT_PROTECTION
         | IncompatibleFeatures::LARGE_EXTENDED_ATTRIBUTES_IN_INODES
         | IncompatibleFeatures::DATA_IN_DIR_ENTRY
         | IncompatibleFeatures::LARGE_DIRECTORIES
@@ -444,53 +533,66 @@ fn check_read_only_compat_features(s_feature_ro_compat: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
     use core::num::NonZero;
+
+    fn raw_superblock_data() -> Vec<u8> {
+        let output = std::process::Command::new("zstd")
+            .args([
+                "--decompress",
+                "--stdout",
+                "test_data/test_disk1.bin.zst",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        output.stdout[1024..1024 + Superblock::SIZE_IN_BYTES_ON_DISK].to_vec()
+    }
 
     #[test]
     fn test_superblock() {
-        let data = include_bytes!("../test_data/raw_superblock.bin");
-        let sb = Superblock::from_bytes(data).unwrap();
+        let data = raw_superblock_data();
+        let sb = Superblock::from_bytes(&data).unwrap();
+        assert_eq!(sb.block_size, BlockSize::from_superblock_value(0).unwrap());
+        assert_eq!(sb.first_data_block, 1);
+        assert_eq!(sb.inode_size, 256);
+        assert_eq!(sb.inodes_per_block_group, NonZero::new(2048).unwrap());
+        assert_eq!(sb.block_group_descriptor_size, 64);
+        assert_eq!(sb.num_block_groups, 8);
+        assert_eq!(sb.min_extra_isize, 32);
+        assert_eq!(sb.label.to_str().unwrap(), "ext4-view testfs");
         assert_eq!(
-            sb,
-            Superblock {
-                block_size: BlockSize::from_superblock_value(0).unwrap(),
-                blocks_count: 128,
-                first_data_block: 1,
-                free_blocks_count: AtomicU64::new(105),
-                free_inodes_count: AtomicU32::new(0), // TODO: not checked
-                inode_size: 256,
-                inodes_per_block_group: NonZero::new(16).unwrap(),
-                block_group_descriptor_size: 64,
-                num_block_groups: 1,
-                incompatible_features:
-                    IncompatibleFeatures::FILE_TYPE_IN_DIR_ENTRY
-                        | IncompatibleFeatures::EXTENTS
-                        | IncompatibleFeatures::IS_64BIT
-                        | IncompatibleFeatures::FLEXIBLE_BLOCK_GROUPS
-                        | IncompatibleFeatures::CHECKSUM_SEED_IN_SUPERBLOCK,
-                read_only_compatible_features:
-                    ReadOnlyCompatibleFeatures::SPARSE_SUPERBLOCKS
-                        | ReadOnlyCompatibleFeatures::LARGE_FILES
-                        | ReadOnlyCompatibleFeatures::HUGE_FILES
-                        | ReadOnlyCompatibleFeatures::LARGE_DIRECTORIES
-                        | ReadOnlyCompatibleFeatures::LARGE_INODES
-                        | ReadOnlyCompatibleFeatures::METADATA_CHECKSUMS,
-                min_extra_isize: 32,
-                checksum_seed: 0xfd3cc0be,
-                htree_hash_seed: [
-                    0xbb071441, 0x7746982f, 0x6007bb8f, 0xb61a9b7
-                ],
-                journal_inode: None,
-                label: Label::new([0; 16]),
-                uuid: Uuid([
-                    0xb6, 0x20, 0x21, 0xd2, 0x70, 0xe5, 0x4d, 0x2c, 0x8a, 0x2d,
-                    0x50, 0x93, 0x4f, 0x1b, 0xaf, 0x77
-                ]),
-                data: data[..Superblock::SIZE_IN_BYTES_ON_DISK]
-                    .try_into()
-                    .unwrap(),
-            }
+            sb.uuid,
+            Uuid([
+                0xb7, 0x1b, 0x09, 0x90, 0x38, 0x59, 0x45, 0x7c, 0x81, 0x60,
+                0x36, 0xde, 0xac, 0x86, 0x4c, 0x27,
+            ])
         );
+        assert!(
+            sb.compatible_features()
+                .contains(CompatibleFeatures::HAS_JOURNAL)
+        );
+        assert!(
+            sb.compatible_features()
+                .contains(CompatibleFeatures::EXT_ATTR)
+        );
+        assert!(
+            sb.incompatible_features()
+                .contains(IncompatibleFeatures::EXTENTS)
+        );
+        assert!(
+            sb.incompatible_features()
+                .contains(IncompatibleFeatures::IS_64BIT)
+        );
+        assert!(
+            sb.incompatible_features()
+                .contains(IncompatibleFeatures::CHECKSUM_SEED_IN_SUPERBLOCK)
+        );
+        assert!(
+            sb.read_only_compatible_features()
+                .contains(ReadOnlyCompatibleFeatures::METADATA_CHECKSUMS)
+        );
+        assert_eq!(sb.data.as_slice(), data.as_slice());
     }
 
     /// Test that the checksum seed gets correctly calculated from the
@@ -498,8 +600,7 @@ mod tests {
     /// feature is not set.
     #[test]
     fn test_no_checksum_seed() {
-        let mut data =
-            include_bytes!("../test_data/raw_superblock.bin").to_vec();
+        let mut data = raw_superblock_data();
 
         // Byte range of `s_feature_incompat`.
         let ifeat_range = 0x60..0x64;
@@ -536,8 +637,7 @@ mod tests {
 
     #[test]
     fn test_too_many_block_groups() {
-        let mut data =
-            include_bytes!("../test_data/raw_superblock.bin").to_vec();
+        let mut data = raw_superblock_data();
         // Set `s_blocks_count_hi` to a very large value so that
         // `num_block_groups` no longer fits in a `u32`.
         data[0x150..0x154].copy_from_slice(&[0xff; 4]);
@@ -549,8 +649,7 @@ mod tests {
 
     #[test]
     fn test_invalid_inode_size() {
-        let mut data =
-            include_bytes!("../test_data/raw_superblock.bin").to_vec();
+        let mut data = raw_superblock_data();
         data[0x58..0x5a].copy_from_slice(&1025u16.to_le_bytes());
         assert_eq!(
             Superblock::from_bytes(&data).unwrap_err(),
@@ -560,8 +659,7 @@ mod tests {
 
     #[test]
     fn test_bad_superblock_checksum() {
-        let mut data =
-            include_bytes!("../test_data/raw_superblock.bin").to_vec();
+        let mut data = raw_superblock_data();
         // Modify a reserved byte. Nothing currently uses this data, but
         // it is still part of the checksum.
         data[0x3f0] ^= 0xff;
@@ -575,8 +673,7 @@ mod tests {
     /// feature bit is set.
     #[test]
     fn test_unknown_incompat_flags() {
-        let mut data =
-            include_bytes!("../test_data/raw_superblock.bin").to_vec();
+        let mut data = raw_superblock_data();
         data[0x62] |= 0x02;
         assert_eq!(
             Superblock::from_bytes(&data).unwrap_err(),

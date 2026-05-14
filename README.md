@@ -17,6 +17,14 @@ Additionally, due to the need for more low-level access to the filesystem, this 
 The two APIs that are exposed are the "raw" API, which is intended for OS drivers,
 and the "std::fs" API, which replicates the standard library's `std::fs` API as closely as possible.
 
+## Stability
+
+This library is currently in pre-0.1.0 and in beta. The API is stable until 0.1.0.
+
+A few experimental OSes are using this library as a filesystem driver.
+
+Currently, there are known bugs, and it is recommended to use this library on ramdisks if writing.
+
 ## Sync vs Async
 
 While this library is async-first, sync APIs are provided via the `sync` feature.
@@ -25,11 +33,9 @@ This has known limitations due to features needing to be additive, but it should
 ## Limitations
 
 - Lack of write support for journaling, although journaling can be read. It is recommended to disable journaling when using this library.
-- No support for reading or writing extended attributes (xattrs) (by extension ACLs and SELinux labels).
+- Limited extended attribute (xattr) support. Small xattrs can be read and written when they fit in the inode body. Writing external xattr blocks is not supported yet.
 
 Everything else should be fully supported, minus the features listed in the compatibility section below.
-
-
 
 ### Compatibility
 
@@ -37,8 +43,8 @@ incompatible:
 ------------
 
 * filetype: **required**
-* recover, extents, 64bit, bg_meta_csum, flex_bg: **yes**
-* compression, journal_dev, meta_bg, mmp, ea_inode, dirdata, largedir, inline_data: **no**
+* recover, extents, 64bit, bg_meta_csum, flex_bg, mmp: **yes**
+* compression, journal_dev, meta_bg, ea_inode, dirdata, largedir, inline_data: **no**
 
 compatible:
 ------------
@@ -60,7 +66,7 @@ Near-term goals (pre-0.1.0):
 
 Goals that are also being worked on, but are not necessarily pre-0.1.0:
 
-- extended attribute support (maybe pre-0.1.0)
+- fuller extended attribute support (external xattr block writes)
 - inline data support
 - journaling write support
 - gdt checksum support

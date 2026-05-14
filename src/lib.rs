@@ -95,8 +95,13 @@
 #![forbid(unsafe_code)]
 #![warn(
     clippy::arithmetic_side_effects,
+    clippy::allow_attributes,
     clippy::as_conversions,
+    clippy::large_futures,
     clippy::must_use_candidate,
+    clippy::rc_mutex,
+    clippy::string_slice,
+    clippy::unused_result_ok,
     clippy::use_self
 )]
 #![warn(missing_docs)]
@@ -129,6 +134,7 @@ mod journal;
 mod label;
 mod mem_io_error;
 mod metadata;
+mod mmp;
 pub mod path;
 pub mod prelude;
 mod reader;
@@ -138,13 +144,13 @@ pub mod sync;
 mod util;
 mod uuid;
 mod writer;
+mod xattr;
 
 #[cfg(all(test, feature = "std"))]
 mod test_util;
 
 use alloc::boxed::Box;
 use alloc::string::String;
-use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use bitmap::BitmapHandle;
@@ -164,8 +170,10 @@ use inode::{
 };
 use iters::file_blocks::FileBlocks;
 use journal::Journal;
+use mmp::Mmp;
 use path::{Path, PathBuf};
 use superblock::Superblock;
+use sync::PtrPrimitive;
 use util::{u64_from_usize, usize_from_u32};
 
 pub use dir_entry::{DirEntry, DirEntryName, DirEntryNameError};
@@ -199,7 +207,7 @@ struct Ext4Inner {
 ///
 /// [ext4]: https://en.wikipedia.org/wiki/Ext4
 #[derive(Clone)]
-pub struct Ext4(Arc<Ext4Inner>);
+pub struct Ext4(PtrPrimitive<Ext4Inner>);
 
 impl Ext4 {
     /// Load an `Ext4` instance from the given `reader`.
@@ -235,7 +243,7 @@ impl Ext4 {
         if !superblock.supports_writes() {
             writer = None;
         }
-        let mut fs = Self(Arc::new(Ext4Inner {
+        let mut fs = Self(PtrPrimitive::new(Ext4Inner {
             block_group_descriptors: BlockGroupDescriptor::read_all(
                 &superblock,
                 &mut *reader,
@@ -254,14 +262,14 @@ impl Ext4 {
         if needs_recovery && fs.0.writer.is_some() {
             journal.replay(&fs).await?;
             {
-                let inner = Arc::get_mut(&mut fs.0).unwrap();
+                let inner = PtrPrimitive::get_mut(&mut fs.0).unwrap();
                 inner.superblock.clear_recovery();
                 inner.journal = Journal::empty();
             }
             fs.0.superblock.write(&fs).await?;
         } else {
-            // OK to unwrap: the journal is stored in an `Arc`, but we haven't cloned it yet, so we have unique access to it.
-            Arc::get_mut(&mut fs.0).unwrap().journal = journal;
+            // OK to unwrap: the journal is stored in an `Arc`/`Rc`, but we haven't cloned it yet, so we have unique access to it.
+            PtrPrimitive::get_mut(&mut fs.0).unwrap().journal = journal;
         }
 
         Ok(fs)
@@ -276,6 +284,19 @@ impl Ext4 {
         let file = std::fs::File::open(path)
             .map_err(|err| Ext4Error::Io(Box::new(err)))?;
         Self::load(Box::new(file)).await
+    }
+
+    #[cfg(all(feature = "std", target_family = "unix"))]
+    /// Load an [`Ext4`] instance from a file at the given path.
+    #[maybe_async::maybe_async]
+    pub async fn load_from_path_rw<P: AsRef<std::path::Path>>(
+        path: P,
+    ) -> Result<Self, Ext4Error> {
+        let file = std::fs::File::open(path)
+            .map_err(|err| Ext4Error::Io(Box::new(err)))?;
+        let file = PtrPrimitive::new(file);
+        Self::load_with_writer(Box::new(file.clone()), Some(Box::new(file)))
+            .await
     }
 
     /// Get the filesystem label.
@@ -775,8 +796,9 @@ impl Ext4 {
 
             let free_blocks = bg.free_blocks_count();
 
-            // TODO: capture with NonZeroU32 and subtract 1 without panic
-            if free_blocks > 0 {
+            // idiomatically: if free_blocks > 0
+            // Done with guard to remove unwrap
+            if let Some(free_blocks) = NonZeroU32::new(free_blocks) {
                 let block_bitmap_handle = self.get_block_bitmap_handle(bg_id);
                 let Some(block_num) =
                     block_bitmap_handle.find_first(false, .., self).await?
@@ -787,9 +809,7 @@ impl Ext4 {
                 block_bitmap_handle.set(block_num, true, self).await?;
                 self.update_block_bitmap_checksum(bg_id, block_bitmap_handle)
                     .await?;
-                bg.set_free_blocks_count(
-                    free_blocks.checked_sub(1u32).unwrap(),
-                );
+                bg.set_free_blocks_count(free_blocks.get() - 1u32);
                 bg.write(self).await?;
                 self.0.superblock.dec_free_blocks_count(1);
                 self.0.superblock.write(self).await?;
@@ -872,11 +892,11 @@ impl Ext4 {
                         NonZeroU64::from(self.0.superblock.blocks_per_group())
                             .get(),
                     )
-                    .unwrap())
+                    .ok_or(Ext4Error::NoSpace)?)
                 .checked_add(u64::from(block_num))
-                .unwrap()
+                .ok_or(Ext4Error::NoSpace)?
                 .checked_add(u64::from(self.0.superblock.first_data_block()))
-                .unwrap();
+                .ok_or(Ext4Error::NoSpace)?;
                 return Ok(block_index);
             }
             bg_id = bg_id.saturating_add(1);
@@ -925,7 +945,9 @@ impl Ext4 {
         let zeroes = vec![0; self.0.superblock.block_size().to_usize()];
         for i in 0..num_blocks.get() {
             self.write_to_block(
-                block_index.checked_add(u64::from(i)).unwrap(),
+                block_index
+                    .checked_add(u64::from(i))
+                    .ok_or(Ext4Error::NoSpace)?,
                 0,
                 &zeroes,
             )
@@ -986,7 +1008,9 @@ impl Ext4 {
         let bg = self.get_block_group_descriptor(block_group_index);
         let free_blocks = bg.free_blocks_count();
         bg.set_free_blocks_count(
-            free_blocks.checked_add(num_blocks.get()).unwrap(),
+            free_blocks
+                .checked_add(num_blocks.get())
+                .ok_or(Ext4Error::NoSpace)?,
         );
         bg.write(self).await?;
         self.0
@@ -996,6 +1020,10 @@ impl Ext4 {
         Ok(())
     }
 
+    /// Frees all blocks and deletes file.
+    ///
+    /// # Errors
+    /// If file blocks are corrupted in any way an error is returned.
     #[maybe_async::maybe_async]
     pub(crate) async fn delete_file(
         &self,
@@ -1007,6 +1035,14 @@ impl Ext4 {
         if !uses_inline_symlink_data {
             let blocks = FileBlocks::new(self.clone(), &inode)?;
             blocks.free_all(self).await?;
+            if inode.flags().contains(InodeFlags::EXTENTS) {
+                let extent_tree =
+                    file_blocks::extent_tree::ExtentTree::from_inode(
+                        &inode,
+                        self.clone(),
+                    )?;
+                extent_tree.free_metadata_blocks().await?;
+            }
         }
         inode.set_size_in_bytes(0);
         inode.set_links_count(0);
@@ -1022,7 +1058,7 @@ impl Ext4 {
         &self,
         options: InodeCreationOptions,
     ) -> Result<Inode, Ext4Error> {
-        // TODO: for the purposes of fsck, it is proper to write inode data, then mark as used
+        // TODO: for the purposes of fscking during recovery, it is proper to write inode data, then mark as used
         let inode_index = self.alloc_inode(options.file_type).await?;
         Inode::create(inode_index, options, self).await
     }
@@ -1067,6 +1103,10 @@ impl Ext4 {
     }
 
     /// Create a symbolic link at `path` pointing to `target`.
+    ///
+    /// # Errors
+    /// See [`Dir::link`] for linking errors. Read-only filesystem cannot be written to.
+    /// If an inode cannot be allocated an error is returned as well.
     #[maybe_async::maybe_async]
     pub async fn symlink(
         &self,
@@ -1104,6 +1144,90 @@ impl Ext4 {
         parent_dir.link(name, &mut inode).await?;
         Ok(inode)
     }
+
+    /// List the extended attributes for `path`.
+    #[maybe_async::maybe_async]
+    pub async fn list_xattrs<'p, P>(
+        &self,
+        path: P,
+    ) -> Result<Vec<Vec<u8>>, Ext4Error>
+    where
+        P: TryInto<Path<'p>>,
+    {
+        let path = path.try_into().map_err(|_| Ext4Error::MalformedPath)?;
+        let inode = self.path_to_inode(path, FollowSymlinks::All).await?;
+        inode.list_xattrs(self).await
+    }
+
+    /// Get an extended attribute from `path`.
+    #[maybe_async::maybe_async]
+    pub async fn get_xattr<'p, P, N>(
+        &self,
+        path: P,
+        name: N,
+    ) -> Result<Option<Vec<u8>>, Ext4Error>
+    where
+        P: TryInto<Path<'p>>,
+        N: AsRef<[u8]>,
+    {
+        let path = path.try_into().map_err(|_| Ext4Error::MalformedPath)?;
+        let inode = self.path_to_inode(path, FollowSymlinks::All).await?;
+        inode.get_xattr(self, name).await
+    }
+
+    /// Set an extended attribute on `path`.
+    #[maybe_async::maybe_async]
+    pub async fn set_xattr<'p, P, N, V>(
+        &self,
+        path: P,
+        name: N,
+        value: V,
+    ) -> Result<(), Ext4Error>
+    where
+        P: TryInto<Path<'p>>,
+        N: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        let path = path.try_into().map_err(|_| Ext4Error::MalformedPath)?;
+        let mut inode = self.path_to_inode(path, FollowSymlinks::All).await?;
+        inode.set_xattr(self, name, value).await
+    }
+
+    /// Remove an extended attribute from `path`.
+    #[maybe_async::maybe_async]
+    pub async fn remove_xattr<'p, P, N>(
+        &self,
+        path: P,
+        name: N,
+    ) -> Result<(), Ext4Error>
+    where
+        P: TryInto<Path<'p>>,
+        N: AsRef<[u8]>,
+    {
+        let path = path.try_into().map_err(|_| Ext4Error::MalformedPath)?;
+        let mut inode = self.path_to_inode(path, FollowSymlinks::All).await?;
+        inode.remove_xattr(self, name).await
+    }
+
+    #[expect(unused)]
+    /// Returns mmp object if available
+    #[maybe_async::maybe_async]
+    pub(crate) async fn mmp(&self) -> Result<Option<Mmp>, Ext4Error> {
+        if !self
+            .0
+            .superblock
+            .incompatible_features()
+            .contains(IncompatibleFeatures::MULTIPLE_MOUNT_PROTECTION)
+        {
+            return Ok(None);
+        }
+        let mmp_block = self.0.superblock.mmp_block();
+        if mmp_block == 0 {
+            return Ok(None);
+        }
+        let block_data = self.read_block(mmp_block).await?;
+        Ok(Some(Mmp::from_bytes(self, &block_data)?))
+    }
 }
 
 /// These methods mirror the [`std::fs`][stdfs] API.
@@ -1133,6 +1257,64 @@ impl Ext4 {
         resolve::resolve_path(self, path, FollowSymlinks::All)
             .await
             .map(|v| v.1)
+    }
+
+    /// Check if `path` exists.
+    ///
+    /// Returns `Ok(true)` if `path` exists, or `Ok(false)` if it does
+    /// not exist.
+    ///
+    /// # Errors
+    ///
+    /// An error will be returned if:
+    /// * `path` is not absolute.
+    ///
+    /// This is not an exhaustive list of errors, see the
+    /// [crate documentation](crate#errors).
+    #[maybe_async::maybe_async]
+    pub async fn exists<'p, P>(&self, path: P) -> Result<bool, Ext4Error>
+    where
+        P: TryInto<Path<'p>>,
+    {
+        #[maybe_async::maybe_async]
+        async fn inner(fs: &Ext4, path: Path<'_>) -> Result<bool, Ext4Error> {
+            match fs.path_to_inode(path, FollowSymlinks::All).await {
+                Ok(_) => Ok(true),
+                Err(Ext4Error::NotFound) => Ok(false),
+                Err(err) => Err(err),
+            }
+        }
+
+        inner(self, path.try_into().map_err(|_| Ext4Error::MalformedPath)?)
+            .await
+    }
+
+    /// Get [`Metadata`] for `path`.
+    ///
+    /// # Errors
+    ///
+    /// An error will be returned if:
+    /// * `path` is not absolute.
+    /// * `path` does not exist.
+    ///
+    /// This is not an exhaustive list of errors, see the
+    /// [crate documentation](crate#errors).
+    #[maybe_async::maybe_async]
+    pub async fn metadata<'p, P>(&self, path: P) -> Result<Metadata, Ext4Error>
+    where
+        P: TryInto<Path<'p>>,
+    {
+        #[maybe_async::maybe_async]
+        async fn inner(
+            fs: &Ext4,
+            path: Path<'_>,
+        ) -> Result<Metadata, Ext4Error> {
+            let inode = fs.path_to_inode(path, FollowSymlinks::All).await?;
+            Ok(inode.metadata())
+        }
+
+        inner(self, path.try_into().map_err(|_| Ext4Error::MalformedPath)?)
+            .await
     }
 
     /// Open the file at `path`.
@@ -1192,29 +1374,34 @@ impl Ext4 {
             .await
     }
 
-    /// Read the entire contents of a file as a string.
+    /// Get an iterator over the entries in a directory.
     ///
     /// # Errors
     ///
     /// An error will be returned if:
     /// * `path` is not absolute.
     /// * `path` does not exist.
-    /// * `path` is a directory or special file type.
+    /// * `path` is not a directory.
     ///
     /// This is not an exhaustive list of errors, see the
     /// [crate documentation](crate#errors).
     #[maybe_async::maybe_async]
-    pub async fn read_to_string<'p, P>(
-        &self,
-        path: P,
-    ) -> Result<String, Ext4Error>
+    pub async fn read_dir<'p, P>(&self, path: P) -> Result<ReadDir, Ext4Error>
     where
         P: TryInto<Path<'p>>,
     {
         #[maybe_async::maybe_async]
-        async fn inner(fs: &Ext4, path: Path<'_>) -> Result<String, Ext4Error> {
-            let content = fs.read(path).await?;
-            String::from_utf8(content).map_err(|_| Ext4Error::NotUtf8)
+        async fn inner(
+            fs: &Ext4,
+            path: Path<'_>,
+        ) -> Result<ReadDir, Ext4Error> {
+            let inode = fs.path_to_inode(path, FollowSymlinks::All).await?;
+
+            if !inode.file_type().is_dir() {
+                return Err(Ext4Error::NotADirectory);
+            }
+
+            ReadDir::new(fs.clone(), &inode, path.into())
         }
 
         inner(self, path.try_into().map_err(|_| Ext4Error::MalformedPath)?)
@@ -1255,92 +1442,29 @@ impl Ext4 {
             .await
     }
 
-    /// Get an iterator over the entries in a directory.
+    /// Read the entire contents of a file as a string.
     ///
     /// # Errors
     ///
     /// An error will be returned if:
     /// * `path` is not absolute.
     /// * `path` does not exist.
-    /// * `path` is not a directory.
+    /// * `path` is a directory or special file type.
     ///
     /// This is not an exhaustive list of errors, see the
     /// [crate documentation](crate#errors).
     #[maybe_async::maybe_async]
-    pub async fn read_dir<'p, P>(&self, path: P) -> Result<ReadDir, Ext4Error>
+    pub async fn read_to_string<'p, P>(
+        &self,
+        path: P,
+    ) -> Result<String, Ext4Error>
     where
         P: TryInto<Path<'p>>,
     {
         #[maybe_async::maybe_async]
-        async fn inner(
-            fs: &Ext4,
-            path: Path<'_>,
-        ) -> Result<ReadDir, Ext4Error> {
-            let inode = fs.path_to_inode(path, FollowSymlinks::All).await?;
-
-            if !inode.file_type().is_dir() {
-                return Err(Ext4Error::NotADirectory);
-            }
-
-            ReadDir::new(fs.clone(), &inode, path.into())
-        }
-
-        inner(self, path.try_into().map_err(|_| Ext4Error::MalformedPath)?)
-            .await
-    }
-
-    /// Check if `path` exists.
-    ///
-    /// Returns `Ok(true)` if `path` exists, or `Ok(false)` if it does
-    /// not exist.
-    ///
-    /// # Errors
-    ///
-    /// An error will be returned if:
-    /// * `path` is not absolute.
-    ///
-    /// This is not an exhaustive list of errors, see the
-    /// [crate documentation](crate#errors).
-    #[maybe_async::maybe_async]
-    pub async fn exists<'p, P>(&self, path: P) -> Result<bool, Ext4Error>
-    where
-        P: TryInto<Path<'p>>,
-    {
-        #[maybe_async::maybe_async]
-        async fn inner(fs: &Ext4, path: Path<'_>) -> Result<bool, Ext4Error> {
-            match fs.path_to_inode(path, FollowSymlinks::All).await {
-                Ok(_) => Ok(true),
-                Err(Ext4Error::NotFound) => Ok(false),
-                Err(err) => Err(err),
-            }
-        }
-
-        inner(self, path.try_into().map_err(|_| Ext4Error::MalformedPath)?)
-            .await
-    }
-
-    /// Get [`Metadata`] for `path`.
-    ///
-    /// # Errors
-    ///
-    /// An error will be returned if:
-    /// * `path` is not absolute.
-    /// * `path` does not exist.
-    ///
-    /// This is not an exhaustive list of errors, see the
-    /// [crate documentation](crate#errors).
-    #[maybe_async::maybe_async]
-    pub async fn metadata<'p, P>(&self, path: P) -> Result<Metadata, Ext4Error>
-    where
-        P: TryInto<Path<'p>>,
-    {
-        #[maybe_async::maybe_async]
-        async fn inner(
-            fs: &Ext4,
-            path: Path<'_>,
-        ) -> Result<Metadata, Ext4Error> {
-            let inode = fs.path_to_inode(path, FollowSymlinks::All).await?;
-            Ok(inode.metadata())
+        async fn inner(fs: &Ext4, path: Path<'_>) -> Result<String, Ext4Error> {
+            let content = fs.read(path).await?;
+            String::from_utf8(content).map_err(|_| Ext4Error::NotUtf8)
         }
 
         inner(self, path.try_into().map_err(|_| Ext4Error::MalformedPath)?)
@@ -1405,6 +1529,19 @@ mod tests {
     use crate::test_util::load_test_disk1_rw_no_fsck;
     use test_util::load_test_disk1;
 
+    fn raw_superblock_data() -> Vec<u8> {
+        let output = std::process::Command::new("zstd")
+            .args([
+                "--decompress",
+                "--stdout",
+                "test_data/test_disk1.bin.zst",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        output.stdout[1024..1024 + Superblock::SIZE_IN_BYTES_ON_DISK].to_vec()
+    }
+
     #[maybe_async::test(
         feature = "sync",
         async(not(feature = "sync"), tokio::test)
@@ -1421,7 +1558,7 @@ mod tests {
         // Not enough data to read the block group descriptors.
         let mut fs_data = vec![0; 2048];
         fs_data[1024..2048]
-            .copy_from_slice(include_bytes!("../test_data/raw_superblock.bin"));
+            .copy_from_slice(&raw_superblock_data());
         let err = Ext4::load(Box::new(fs_data.clone())).await.unwrap_err();
         assert!(matches!(err, Ext4Error::Io(_)));
 
@@ -1439,9 +1576,9 @@ mod tests {
         async(not(feature = "sync"), tokio::test)
     )]
     async fn test_invalid_ext4_data() {
-        // Fill in zeros for the first 1024 bytes, then add the test data.
-        let mut data = vec![0; 1024];
-        data.extend(include_bytes!("../test_data/not_ext4.bin"));
+        let mut data = vec![0; 2048];
+        data[1024 + 0x18..1024 + 0x1c].copy_from_slice(&99u32.to_le_bytes());
+        data[1024 + 0x38..1024 + 0x3a].copy_from_slice(&0xef53u16.to_le_bytes());
 
         let err = Ext4::load(Box::new(data)).await.unwrap_err();
         assert_eq!(err, CorruptKind::InvalidBlockSize);

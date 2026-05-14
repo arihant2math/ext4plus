@@ -22,7 +22,7 @@ use extents_blocks::ExtentsBlocks;
 // This enum is separate from `FileBlocks` to keep the implementation
 // details private to this module; members of an enum cannot be more
 // private than the enum itself.
-#[allow(clippy::large_enum_variant)]
+#[expect(clippy::large_enum_variant)]
 enum FileBlocksInner {
     ExtentsBlocks(ExtentsBlocks),
     BlockMap(BlockMap),

@@ -24,9 +24,6 @@ env:
 jobs:
   msrv:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        sync-feature: [ "", "-F sync" ]
     steps:
       - uses: actions/checkout@v6
       - uses: Swatinem/rust-cache@v2
@@ -35,27 +32,21 @@ jobs:
           msrv=$(cargo metadata --no-deps --format-version=1 | jq --raw-output '.packages[] | select(.name == "ext4plus") | .rust_version')
 
           rustup toolchain install ${msrv} --profile minimal --no-self-update
-          cargo +${msrv} build -p ext4plus ${{ matrix.sync-feature }}
+          ./scripts/all_conf.sh +${msrv} build -p ext4plus ${{ matrix.sync-feature }}
 
   check:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        sync-feature: [ "", "-F sync" ]
     steps:
       - uses: actions/checkout@v6
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace $({{ matrix.sync-feature }})
+      - run: ./scripts/all_conf.sh check --workspace $({{ matrix.sync-feature }})
 
   clippy:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        sync-feature: [ "", "-F sync" ]
     steps:
       - uses: actions/checkout@v6
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy ${{ matrix.sync-feature }}
+      - run: ./scripts/all_conf.sh clippy ${{ matrix.sync-feature }}
 
   clippy-workspace:
     runs-on: ubuntu-latest
@@ -86,26 +77,23 @@ jobs:
           files: lcov.info
           fail_ci_if_error: true
 
-  test-sync:
+  test-all:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           lfs: true
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p ext4plus -F std -F sync
+      - run: ./scripts/all_conf.sh test -p ext4plus
 
   test-windows:
     runs-on: windows-latest
-    strategy:
-      matrix:
-        sync-feature: [ "", "-F sync" ]
     steps:
       - uses: actions/checkout@v6
         with:
           lfs: true
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p ext4plus -F std ${{ matrix.sync-feature }}
+      - run: ./scripts/all_conf.sh test -p ext4plus
 
   doc:
     runs-on: ubuntu-latest
@@ -164,8 +152,7 @@ jobs:
       - run: rustup install beta
       - run: rustup component add --toolchain beta clippy rustfmt
       - run: rustup default beta
-      - run: cargo clippy --workspace
+      - run: ./scripts/all_conf.sh clippy --workspace
       - run: cargo doc -F std
       - run: cargo fmt --all -- --check
-      - run: cargo test -p ext4plus -F std
-      - run: cargo test -p ext4plus -F std -F sync
+      - run: ./scripts/all_conf.sh test -p ext4plus

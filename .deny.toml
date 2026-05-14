@@ -31,6 +31,7 @@ license-files = [
 multiple-versions = "deny"
 skip-tree = [
     { name = "getrandom", version = "0.2.15" },
+    { name = "tokio", version = "1.*" },
     { name = "windows-sys", version = "0.*" },
     { name = "wit-bindgen", version = "0.*" },
 ]

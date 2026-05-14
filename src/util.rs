@@ -147,3 +147,18 @@ pub(crate) fn read_u32be(bytes: &[u8], offset: usize) -> u32 {
     let bytes = bytes.get(offset..end).unwrap();
     u32::from_be_bytes(bytes.try_into().unwrap())
 }
+
+/// Read a little-endian [`u64`] from `bytes` at `offset`.
+///
+/// # Panics
+///
+/// Panics if `bytes` is not large enough to read four bytes at `offset`.
+#[inline]
+#[must_use]
+#[track_caller]
+pub(crate) fn read_u64le(bytes: &[u8], offset: usize) -> u64 {
+    // OK to unwrap: these panics are described in the docstring.
+    let end = offset.checked_add(size_of::<u64>()).unwrap();
+    let bytes = bytes.get(offset..end).unwrap();
+    u64::from_le_bytes(bytes.try_into().unwrap())
+}
