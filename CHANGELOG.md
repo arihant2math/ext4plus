@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- FIXED: Panic if unlinking an inode when the inode id and the directory entry name don't match.
 - FIXED: Replace `Arc` with `PtrPrimitive` in remaining areas to allow for less overhead in single-threaded environments.
 
 ## 0.1.0-rc.1
