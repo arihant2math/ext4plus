@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- FIXED: Replace `Arc` with `PtrPrimitive` in remaining areas to allow for less overhead in single-threaded environments.
+
 ## 0.1.0-rc.1
 
 - ADDED: Full htree directory support, including expanding when needed, etc.
