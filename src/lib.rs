@@ -707,6 +707,22 @@ impl Ext4 {
         ))
     }
 
+    fn block_index_from_group_offset(
+        &self,
+        block_group_index: BlockGroupIndex,
+        block_offset: u32,
+    ) -> Result<FsBlockIndex, Ext4Error> {
+        u64::from(block_group_index)
+            .checked_mul(
+                NonZeroU64::from(self.0.superblock.blocks_per_group()).get(),
+            )
+            .ok_or(Ext4Error::NoSpace)?
+            .checked_add(u64::from(block_offset))
+            .ok_or(Ext4Error::NoSpace)?
+            .checked_add(u64::from(self.0.superblock.first_data_block()))
+            .ok_or(Ext4Error::NoSpace)
+    }
+
     #[expect(unused)]
     #[maybe_async::maybe_async]
     pub(crate) async fn alloc_block_num(
@@ -733,7 +749,7 @@ impl Ext4 {
         bg.write(self).await?;
         self.0.superblock.dec_free_blocks_count(1);
         self.0.superblock.write(self).await?;
-        Ok(())
+        self.clear_block(block).await
     }
 
     #[maybe_async::maybe_async]
@@ -777,20 +793,9 @@ impl Ext4 {
                 self.0.superblock.dec_free_blocks_count(1);
                 self.0.superblock.write(self).await?;
 
-                // Zero out the new block
-                let block_index = u64::from(bg_id)
-                    .checked_mul(
-                        NonZeroU64::from(self.0.superblock.blocks_per_group())
-                            .get(),
-                    )
-                    .unwrap()
-                    .checked_add(u64::from(block_num))
-                    .unwrap()
-                    .checked_add(u64::from(
-                        self.0.superblock.first_data_block(),
-                    ))
-                    .unwrap();
-
+                let block_index =
+                    self.block_index_from_group_offset(bg_id, block_num)?;
+                self.clear_block(block_index).await?;
                 return Ok(block_index);
             }
 
@@ -849,16 +854,9 @@ impl Ext4 {
                     .superblock
                     .dec_free_blocks_count(u64::from(num_blocks.get()));
                 self.0.superblock.write(self).await?;
-                let block_index = (u64::from(bg_id)
-                    .checked_mul(
-                        NonZeroU64::from(self.0.superblock.blocks_per_group())
-                            .get(),
-                    )
-                    .ok_or(Ext4Error::NoSpace)?)
-                .checked_add(u64::from(block_num))
-                .ok_or(Ext4Error::NoSpace)?
-                .checked_add(u64::from(self.0.superblock.first_data_block()))
-                .ok_or(Ext4Error::NoSpace)?;
+                let block_index =
+                    self.block_index_from_group_offset(bg_id, block_num)?;
+                self.clear_blocks(block_index, num_blocks).await?;
                 return Ok(block_index);
             }
             bg_id = bg_id.saturating_add(1);
@@ -887,7 +885,6 @@ impl Ext4 {
         Err(Ext4Error::NoSpace)
     }
 
-    #[expect(unused)]
     #[maybe_async::maybe_async]
     pub(crate) async fn clear_block(
         &self,
@@ -897,7 +894,6 @@ impl Ext4 {
         self.write_to_block(block_index, 0, &zeroes).await
     }
 
-    #[expect(unused)]
     #[maybe_async::maybe_async]
     pub(crate) async fn clear_blocks(
         &self,
@@ -1475,7 +1471,9 @@ impl Debug for Ext4 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::load_test_disk1_rw_no_fsck;
+    use crate::test_util::{
+        load_compressed_filesystem_rw, load_test_disk1_rw_no_fsck,
+    };
     use test_util::load_test_disk1;
 
     #[maybe_async::test(
@@ -1687,5 +1685,63 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(data, [5; 4]);
+    }
+
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn test_alloc_block_zeroes_reused_blocks() {
+        let (fs, _) =
+            load_compressed_filesystem_rw("test_disk_ext2.bin.zst").await;
+        let inode = InodeIndex::new(2).unwrap();
+        let garbage = vec![0xa5; fs.0.superblock.block_size().to_usize()];
+
+        let block = fs.alloc_block(inode).await.unwrap();
+        fs.write_to_block(block, 0, &garbage).await.unwrap();
+        fs.free_block(block).await.unwrap();
+
+        let reused_block = fs.alloc_block(inode).await.unwrap();
+        assert_eq!(reused_block, block);
+
+        let block_data = fs.read_block(reused_block).await.unwrap();
+        assert!(block_data.iter().all(|&byte| byte == 0));
+    }
+
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn test_alloc_contiguous_blocks_zeroes_reused_blocks() {
+        let (fs, _) =
+            load_compressed_filesystem_rw("test_disk_ext2.bin.zst").await;
+        let inode = InodeIndex::new(2).unwrap();
+        let num_blocks = NonZeroU32::new(2).unwrap();
+        let garbage = vec![0xa5; fs.0.superblock.block_size().to_usize()];
+
+        let start_block =
+            fs.alloc_contiguous_blocks(inode, num_blocks).await.unwrap();
+        for i in 0..num_blocks.get() {
+            fs.write_to_block(
+                start_block.checked_add(u64::from(i)).unwrap(),
+                0,
+                &garbage,
+            )
+            .await
+            .unwrap();
+        }
+        fs.free_blocks(start_block, num_blocks).await.unwrap();
+
+        let reused_start =
+            fs.alloc_contiguous_blocks(inode, num_blocks).await.unwrap();
+        assert_eq!(reused_start, start_block);
+
+        for i in 0..num_blocks.get() {
+            let block_data = fs
+                .read_block(reused_start.checked_add(u64::from(i)).unwrap())
+                .await
+                .unwrap();
+            assert!(block_data.iter().all(|&byte| byte == 0));
+        }
     }
 }

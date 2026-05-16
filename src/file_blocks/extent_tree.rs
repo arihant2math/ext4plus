@@ -1924,19 +1924,14 @@ impl ExtentTree {
 
                 let write_end = range_end(written, take)?;
                 let chunk = &buf[written..write_end];
-                let is_full_block_write =
-                    block_offset == 0 && take == block_size;
 
-                if is_full_block_write {
-                    ext4.write_to_block(fs_block, 0, chunk).await?;
-                } else {
-                    let mut block_buf = alloc::vec![0u8; block_size];
-                    let block_end = block_offset
-                        .checked_add(take)
-                        .ok_or(CorruptKind::InvalidBlockSize)?;
-                    block_buf[block_offset..block_end].copy_from_slice(chunk);
-                    ext4.write_to_block(fs_block, 0, &block_buf).await?;
-                }
+                ext4.write_to_block(
+                    fs_block,
+                    u32::try_from(block_offset)
+                        .map_err(|_| CorruptKind::InvalidBlockSize)?,
+                    chunk,
+                )
+                .await?;
 
                 written = write_end;
             }

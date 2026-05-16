@@ -6,7 +6,6 @@ use crate::util::{read_u32le, u64_from_usize, usize_from_u32};
 use crate::{Ext4, Ext4Error, Inode};
 
 use crate::error::CorruptKind;
-use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::num::{NonZeroU32, NonZeroUsize};
@@ -147,15 +146,6 @@ impl<T: BlockMapEntry> IndirectBlock<T> {
 }
 
 #[maybe_async::maybe_async]
-async fn initialize_indirect_block(
-    fs: &Ext4,
-    block_index: FsBlockIndex,
-) -> Result<(), Ext4Error> {
-    let zeroes = vec![0; fs.0.superblock.block_size().to_usize()];
-    fs.write_to_block(block_index, 0, &zeroes).await
-}
-
-#[maybe_async::maybe_async]
 async fn ensure_allocated<T: BlockMapEntry>(
     block: &mut IndirectBlock<T>,
     allocated: &mut u32,
@@ -163,7 +153,6 @@ async fn ensure_allocated<T: BlockMapEntry>(
 ) -> Result<(), Ext4Error> {
     if block.block_index.value() == 0 {
         let new_block_index = fs.alloc_block(NonZeroU32::MIN).await?;
-        initialize_indirect_block(fs, new_block_index).await?;
         *allocated = allocated.checked_add(1).ok_or(Ext4Error::FileTooLarge)?;
         *block = IndirectBlock::new(BlockIndex(block_index_to_u32(
             new_block_index,
@@ -716,27 +705,8 @@ impl BlockMap {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
-    use crate::inode::InodeIndex;
     use crate::test_util::load_compressed_filesystem_rw;
     use crate::{FileType, InodeCreationOptions, InodeFlags, InodeMode};
-
-    #[maybe_async::test(
-        feature = "sync",
-        async(not(feature = "sync"), tokio::test)
-    )]
-    async fn test_initialize_indirect_block_zeroes_contents() {
-        let (fs, _) =
-            load_compressed_filesystem_rw("test_disk_ext2.bin.zst").await;
-        let block = fs.alloc_block(InodeIndex::new(2).unwrap()).await.unwrap();
-
-        let garbage = vec![0xa5; fs.0.superblock.block_size().to_usize()];
-        fs.write_to_block(block, 0, &garbage).await.unwrap();
-
-        initialize_indirect_block(&fs, block).await.unwrap();
-
-        let block_data = fs.read_block(block).await.unwrap();
-        assert!(block_data.iter().all(|&byte| byte == 0));
-    }
 
     #[maybe_async::test(
         feature = "sync",
