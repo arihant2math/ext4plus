@@ -164,11 +164,11 @@ use dir::Dir;
 use error::{CorruptKind, Ext4Error};
 use features::ReadOnlyCompatibleFeatures;
 use file::{File, write_at};
+use file_blocks::FileBlocks;
 use inode::{
     Inode, InodeCreationOptions, InodeFlags, InodeIndex, InodeMode,
     get_inode_block_group_location,
 };
-use iters::file_blocks::FileBlocks;
 use journal::Journal;
 use mmp::Mmp;
 use path::{Path, PathBuf};
@@ -991,8 +991,8 @@ impl Ext4 {
         &self,
         mut inode: Inode,
     ) -> Result<(), Ext4Error> {
-        let blocks = FileBlocks::new(self.clone(), &inode)?;
-        blocks.free_all(self).await?;
+        let blocks = FileBlocks::from_inode(&inode, self.clone())?;
+        blocks.free_all(&inode, self).await?;
         if inode.flags().contains(InodeFlags::EXTENTS) {
             let extent_tree = file_blocks::extent_tree::ExtentTree::from_inode(
                 &inode,
