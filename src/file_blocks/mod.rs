@@ -66,18 +66,11 @@ impl FileBlocks {
     }
 
     #[maybe_async::maybe_async]
-    pub(crate) async fn free_all(
-        &self,
-        inode: &Inode,
-        ext4: &Ext4,
-    ) -> Result<(), Ext4Error> {
-        for file_block in 0..inode.file_size_in_blocks(ext4)? {
-            let block = self.get_block(file_block).await?;
-            if block != 0 {
-                ext4.free_block(block).await?;
-            }
+    pub(crate) async fn free_all(&self) -> Result<(), Ext4Error> {
+        match self {
+            Self::ExtentTree(extent_tree) => extent_tree.free_all().await,
+            Self::BlockMap(block_map) => block_map.free_all().await,
         }
-        Ok(())
     }
 
     #[maybe_async::maybe_async]

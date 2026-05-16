@@ -94,6 +94,20 @@ impl<T: BlockMapEntry> IndirectBlock<T> {
     }
 
     #[maybe_async::maybe_async]
+    async fn entries(&self, fs: &Ext4) -> Result<Vec<BlockIndex>, Ext4Error> {
+        if self.block_index.value() == 0 {
+            return Ok(Vec::new());
+        }
+
+        let block_data = fs.read_block(u64::from(self.block_index.0)).await?;
+        let mut entries = Vec::with_capacity(block_data.len() / 4);
+        for offset in (0..block_data.len()).step_by(4) {
+            entries.push(BlockIndex(read_u32le(&block_data, offset)));
+        }
+        Ok(entries)
+    }
+
+    #[maybe_async::maybe_async]
     async fn get(&self, index: usize, fs: &Ext4) -> Result<T, Ext4Error> {
         let block_data = fs.read_block(u64::from(self.block_index.0)).await?;
         let entry_index = index
@@ -470,6 +484,102 @@ impl BlockMap {
     }
 
     #[maybe_async::maybe_async]
+    async fn collect_data_and_metadata_blocks(
+        &self,
+    ) -> Result<(Vec<FsBlockIndex>, Vec<FsBlockIndex>), Ext4Error> {
+        let mut data_blocks = self
+            .direct_blocks
+            .iter()
+            .copied()
+            .filter(|block| *block != 0)
+            .map(FsBlockIndex::from)
+            .collect::<Vec<_>>();
+        let mut metadata_blocks = Vec::new();
+
+        if self.single_indirect_block.block_index.value() != 0 {
+            metadata_blocks.push(FsBlockIndex::from(
+                self.single_indirect_block.block_index.value(),
+            ));
+            for block in self.single_indirect_block.entries(&self.fs).await? {
+                if block.value() != 0 {
+                    data_blocks.push(FsBlockIndex::from(block.value()));
+                }
+            }
+        }
+
+        if self.double_indirect_block.block_index.value() != 0 {
+            metadata_blocks.push(FsBlockIndex::from(
+                self.double_indirect_block.block_index.value(),
+            ));
+            for block in self.double_indirect_block.entries(&self.fs).await? {
+                if block.value() == 0 {
+                    continue;
+                }
+
+                metadata_blocks.push(FsBlockIndex::from(block.value()));
+                let indirect_block = IndirectBlock::<BlockIndex>::new(block);
+                for data_block in indirect_block.entries(&self.fs).await? {
+                    if data_block.value() != 0 {
+                        data_blocks
+                            .push(FsBlockIndex::from(data_block.value()));
+                    }
+                }
+            }
+        }
+
+        if self.triple_indirect_block.block_index.value() != 0 {
+            metadata_blocks.push(FsBlockIndex::from(
+                self.triple_indirect_block.block_index.value(),
+            ));
+            for double_indirect in
+                self.triple_indirect_block.entries(&self.fs).await?
+            {
+                if double_indirect.value() == 0 {
+                    continue;
+                }
+
+                metadata_blocks
+                    .push(FsBlockIndex::from(double_indirect.value()));
+                let double_indirect_block =
+                    IndirectBlock::<IndirectBlock<BlockIndex>>::new(
+                        double_indirect,
+                    );
+                for indirect in double_indirect_block.entries(&self.fs).await? {
+                    if indirect.value() == 0 {
+                        continue;
+                    }
+
+                    metadata_blocks.push(FsBlockIndex::from(indirect.value()));
+                    let indirect_block =
+                        IndirectBlock::<BlockIndex>::new(indirect);
+                    for data_block in indirect_block.entries(&self.fs).await? {
+                        if data_block.value() != 0 {
+                            data_blocks
+                                .push(FsBlockIndex::from(data_block.value()));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok((data_blocks, metadata_blocks))
+    }
+
+    #[maybe_async::maybe_async]
+    pub(crate) async fn free_all(&self) -> Result<(), Ext4Error> {
+        let (data_blocks, metadata_blocks) =
+            self.collect_data_and_metadata_blocks().await?;
+
+        for block in data_blocks {
+            self.fs.free_block(block).await?;
+        }
+        for block in metadata_blocks {
+            self.fs.free_block(block).await?;
+        }
+        Ok(())
+    }
+
+    #[maybe_async::maybe_async]
     pub(crate) async fn write_at(
         &mut self,
         inode: &mut Inode,
@@ -608,6 +718,7 @@ mod tests {
     use super::*;
     use crate::inode::InodeIndex;
     use crate::test_util::load_compressed_filesystem_rw;
+    use crate::{FileType, InodeCreationOptions, InodeFlags, InodeMode};
 
     #[maybe_async::test(
         feature = "sync",
@@ -625,5 +736,51 @@ mod tests {
 
         let block_data = fs.read_block(block).await.unwrap();
         assert!(block_data.iter().all(|&byte| byte == 0));
+    }
+
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn test_free_all_frees_indirect_metadata() {
+        let (fs, _) =
+            load_compressed_filesystem_rw("test_disk_ext2.bin.zst").await;
+        let mut inode = fs
+            .create_inode(InodeCreationOptions {
+                file_type: FileType::Regular,
+                mode: InodeMode::S_IFREG
+                    | InodeMode::S_IRUSR
+                    | InodeMode::S_IWUSR,
+                uid: 0,
+                gid: 0,
+                time: Default::default(),
+                flags: InodeFlags::empty(),
+            })
+            .await
+            .unwrap();
+        let mut block_map = BlockMap::from_inode(&inode, fs.clone());
+        let block_size = fs.0.superblock.block_size();
+        let block_size_u64 = block_size.to_u64();
+        let data = vec![0xa5; block_size.to_usize()];
+        let free_blocks_before = fs.0.superblock.free_blocks_count();
+
+        for i in 0..13u64 {
+            block_map
+                .write_at(
+                    &mut inode,
+                    &data,
+                    i.checked_mul(block_size_u64).unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+
+        let free_blocks_after_write = fs.0.superblock.free_blocks_count();
+        assert_eq!(free_blocks_before - free_blocks_after_write, 14);
+        assert_ne!(block_map.single_indirect_block.block_index.value(), 0);
+
+        block_map.free_all().await.unwrap();
+
+        assert_eq!(fs.0.superblock.free_blocks_count(), free_blocks_before);
     }
 }

@@ -992,14 +992,7 @@ impl Ext4 {
         mut inode: Inode,
     ) -> Result<(), Ext4Error> {
         let blocks = FileBlocks::from_inode(&inode, self.clone())?;
-        blocks.free_all(&inode, self).await?;
-        if inode.flags().contains(InodeFlags::EXTENTS) {
-            let extent_tree = file_blocks::extent_tree::ExtentTree::from_inode(
-                &inode,
-                self.clone(),
-            )?;
-            extent_tree.free_metadata_blocks().await?;
-        }
+        blocks.free_all().await?;
         inode.set_size_in_bytes(0);
         inode.set_links_count(0);
         inode.write(self).await?;

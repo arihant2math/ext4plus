@@ -536,6 +536,19 @@ impl ExtentTree {
             .map_err(|_| CorruptKind::ExtentNodeSize(self.inode).into())
     }
 
+    #[maybe_async::maybe_async]
+    pub(crate) async fn free_all(&self) -> Result<(), Ext4Error> {
+        let freed = self
+            .collect_extents()
+            .await?
+            .into_iter()
+            .map(|extent| (extent.start_block, u32::from(extent.num_blocks)))
+            .collect();
+        free_freed_ranges(&self.ext4, self.inode, freed).await?;
+        self.free_metadata_blocks().await?;
+        Ok(())
+    }
+
     fn required_metadata_blocks(
         &self,
         num_extents: usize,
@@ -2284,6 +2297,7 @@ mod tests {
     use crate::file_blocks::extent_tree::ExtentTree;
     use crate::inode::Inode;
     use crate::test_util::{load_test_disk1_rw, load_test_disk1_rw_no_fsck};
+    use crate::{FileType, InodeCreationOptions, InodeFlags, InodeMode};
 
     use super::{
         CorruptKind, ENTRY_SIZE_IN_BYTES, Ext4, Ext4Error, ExtentInternalNode,
@@ -2787,5 +2801,50 @@ mod tests {
             panic!("expected leaf");
         };
         assert_eq!(extents.len(), 2);
+    }
+
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn test_free_all_frees_extent_metadata() {
+        let fs = load_test_disk1_rw_no_fsck().await;
+        let mut inode = fs
+            .create_inode(InodeCreationOptions {
+                file_type: FileType::Regular,
+                mode: InodeMode::S_IFREG
+                    | InodeMode::S_IRUSR
+                    | InodeMode::S_IWUSR,
+                uid: 0,
+                gid: 0,
+                time: Default::default(),
+                flags: InodeFlags::empty(),
+            })
+            .await
+            .unwrap();
+        let mut tree = ExtentTree::from_inode(&inode, fs.clone()).unwrap();
+        let block_size = fs.0.superblock.block_size();
+        let block_size_u64 = block_size.to_u64();
+        let data = vec![0xa5; block_size.to_usize()];
+        let free_blocks_before = fs.0.superblock.free_blocks_count();
+
+        for i in [0u64, 2, 4, 6, 8] {
+            tree.write_at(
+                &mut inode,
+                &data,
+                i.checked_mul(block_size_u64).unwrap(),
+            )
+            .await
+            .unwrap();
+        }
+
+        let free_blocks_after_write = fs.0.superblock.free_blocks_count();
+        assert_eq!(free_blocks_before - free_blocks_after_write, 6);
+        let metadata_blocks = tree.metadata_block_count().await.unwrap();
+        assert_eq!(metadata_blocks, 1);
+
+        tree.free_all().await.unwrap();
+
+        assert_eq!(fs.0.superblock.free_blocks_count(), free_blocks_before);
     }
 }
