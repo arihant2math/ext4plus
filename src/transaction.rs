@@ -24,6 +24,7 @@ impl Transaction {
         }
     }
 
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn is_dirty(&self) -> bool {
         !self.dirty_blocks.is_empty()

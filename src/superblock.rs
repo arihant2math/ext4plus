@@ -16,6 +16,7 @@ use crate::features::{
     ReadOnlyCompatibleFeatures,
 };
 use crate::inode::InodeIndex;
+use crate::transaction::Transaction;
 use crate::util::{
     read_u16le, read_u32le, read_u64le, u64_from_hilo, u64_to_hilo, write_u32le,
 };
@@ -303,6 +304,27 @@ impl Superblock {
         Ok(())
     }
 
+    #[maybe_async::maybe_async]
+    pub(crate) async fn write_in_transaction(
+        &self,
+        ext4: &Ext4,
+        tx: &mut Transaction,
+    ) -> Result<(), Ext4Error> {
+        let data = self.to_bytes();
+        let offset = 1024u64;
+        let block_size = ext4.0.superblock.block_size().to_u64();
+        let block_index = offset
+            .checked_div(block_size)
+            .ok_or(CorruptKind::InvalidBlockSize)?;
+        let offset_within_block = offset
+            .checked_rem(block_size)
+            .ok_or(CorruptKind::InvalidBlockSize)?;
+        let offset_within_block = u32::try_from(offset_within_block)
+            .map_err(|_| Ext4Error::from(CorruptKind::InvalidBlockSize))?;
+        tx.write_to_block(block_index, offset_within_block, &data)
+            .await
+    }
+
     pub(crate) fn block_size(&self) -> BlockSize {
         self.block_size
     }
@@ -402,15 +424,16 @@ impl Superblock {
         self.free_blocks_count.load(Ordering::Relaxed)
     }
 
-    #[expect(unused)]
     pub(crate) fn set_free_blocks_count(&self, count: u64) {
         self.free_blocks_count.store(count, Ordering::Relaxed);
     }
 
+    #[expect(unused)]
     pub(crate) fn inc_free_blocks_count(&self, amount: u64) {
         self.free_blocks_count.fetch_add(amount, Ordering::Relaxed);
     }
 
+    #[expect(unused)]
     pub(crate) fn dec_free_blocks_count(&self, amount: u64) {
         self.free_blocks_count.fetch_sub(amount, Ordering::Relaxed);
     }

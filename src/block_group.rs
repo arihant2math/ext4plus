@@ -11,6 +11,7 @@ use crate::checksum::Checksum;
 use crate::error::{CorruptKind, Ext4Error};
 use crate::features::{IncompatibleFeatures, ReadOnlyCompatibleFeatures};
 use crate::superblock::Superblock;
+use crate::transaction::Transaction;
 use crate::util::{
     read_u16le, read_u32le, u32_from_hilo, u32_to_hilo, u64_from_hilo,
     u64_to_hilo, usize_from_u32, write_u16le, write_u32le,
@@ -39,7 +40,6 @@ impl Deref for BlockGroupDescriptorBytes {
     }
 }
 
-#[expect(unused)]
 pub(crate) enum TruncatedChecksum {
     Truncated(u16),
     Full(u32),
@@ -284,7 +284,7 @@ impl BlockGroupDescriptor {
         }
     }
 
-    fn update_checksum(&self, superblock: &Superblock) {
+    fn checksum_for_write(&self, superblock: &Superblock) -> Option<u16> {
         if superblock
             .read_only_compatible_features()
             .contains(ReadOnlyCompatibleFeatures::METADATA_CHECKSUMS)
@@ -299,8 +299,7 @@ impl BlockGroupDescriptor {
             // Rest of the block group descriptor.
             checksum.update(&bytes[Self::BG_CHECKSUM_OFFSET + 2..]);
             // Truncate to the lower 16 bits.
-            let checksum = u16::try_from(checksum.finalize() & 0xffff).unwrap();
-            self.checksum.store(checksum, Ordering::Relaxed);
+            Some(u16::try_from(checksum.finalize() & 0xffff).unwrap())
         } else if superblock
             .read_only_compatible_features()
             .contains(ReadOnlyCompatibleFeatures::GROUP_DESCRIPTOR_CHECKSUMS)
@@ -308,7 +307,19 @@ impl BlockGroupDescriptor {
             unimplemented!(
                 "Support for the GROUP_DESCRIPTOR_CHECKSUMS feature is not yet implemented"
             );
+        } else {
+            None
         }
+    }
+
+    fn write_bytes(
+        &self,
+        superblock: &Superblock,
+    ) -> BlockGroupDescriptorBytes {
+        if let Some(checksum) = self.checksum_for_write(superblock) {
+            self.checksum.store(checksum, Ordering::Relaxed);
+        }
+        self.to_bytes()
     }
 
     pub(crate) fn block_bitmap_block(&self) -> FsBlockIndex {
@@ -454,14 +465,33 @@ impl BlockGroupDescriptor {
     pub(crate) async fn write(&self, ext4: &Ext4) -> Result<(), Ext4Error> {
         let start = Self::get_start_byte(&ext4.0.superblock, self.index)
             .ok_or(CorruptKind::BlockGroupDescriptor(self.index))?;
-        self.update_checksum(&ext4.0.superblock);
+        let bytes = self.write_bytes(&ext4.0.superblock);
         // Write only the data we've saved to avoid overwriting any unread info
         let writer = ext4.0.writer.as_ref().ok_or(Ext4Error::Readonly)?;
-        writer
-            .write(start, &self.to_bytes())
-            .await
-            .map_err(Ext4Error::Io)?;
+        writer.write(start, &bytes).await.map_err(Ext4Error::Io)?;
         Ok(())
+    }
+
+    #[maybe_async::maybe_async]
+    pub(crate) async fn write_in_transaction(
+        &self,
+        ext4: &Ext4,
+        tx: &mut Transaction,
+    ) -> Result<(), Ext4Error> {
+        let start = Self::get_start_byte(&ext4.0.superblock, self.index)
+            .ok_or(CorruptKind::BlockGroupDescriptor(self.index))?;
+        let block_size = ext4.0.superblock.block_size().to_u64();
+        let block_index = start
+            .checked_div(block_size)
+            .ok_or(CorruptKind::InvalidBlockSize)?;
+        let offset_within_block = start
+            .checked_rem(block_size)
+            .ok_or(CorruptKind::InvalidBlockSize)?;
+        let offset_within_block = u32::try_from(offset_within_block)
+            .map_err(|_| Ext4Error::from(CorruptKind::InvalidBlockSize))?;
+        let bytes = self.write_bytes(&ext4.0.superblock);
+        tx.write_to_block(block_index, offset_within_block, &bytes)
+            .await
     }
 
     /// Read all block group descriptors.

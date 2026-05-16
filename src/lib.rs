@@ -155,7 +155,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use bitmap::BitmapHandle;
-use block_group::{BlockGroupDescriptor, BlockGroupIndex};
+use block_group::{BlockGroupDescriptor, BlockGroupIndex, TruncatedChecksum};
 use block_index::FsBlockIndex;
 use core::fmt::{self, Debug, Formatter};
 use core::num::NonZeroU32;
@@ -382,6 +382,7 @@ impl Ext4 {
 
     /// Read data from the exact on-disk block index without applying journal
     /// remapping.
+    #[cfg_attr(not(test), expect(dead_code))]
     #[maybe_async::maybe_async]
     pub(crate) async fn read_from_block_raw(
         &self,
@@ -580,31 +581,82 @@ impl Ext4 {
     }
 
     #[maybe_async::maybe_async]
-    async fn update_block_bitmap_checksum(
+    async fn update_block_bitmap_checksum_in_transaction(
         &self,
         block_group_index: BlockGroupIndex,
         bitmap_handle: BitmapHandle,
+        tx: &Transaction,
     ) -> Result<(), Ext4Error> {
-        let checksum =
-            bitmap_handle.calc_checksum(self, block_group_index).await?;
+        let checksum = bitmap_handle
+            .calc_checksum_in_transaction(self, block_group_index, tx)
+            .await?;
         let block_group = self.get_block_group_descriptor(block_group_index);
         block_group.set_block_bitmap_checksum(checksum);
-        block_group.write(self).await?;
         Ok(())
     }
 
     #[maybe_async::maybe_async]
-    async fn update_inode_bitmap_checksum(
+    async fn update_inode_bitmap_checksum_in_transaction(
         &self,
         block_group_index: BlockGroupIndex,
         bitmap_handle: BitmapHandle,
+        tx: &Transaction,
     ) -> Result<(), Ext4Error> {
-        let checksum =
-            bitmap_handle.calc_checksum(self, block_group_index).await?;
+        let checksum = bitmap_handle
+            .calc_checksum_in_transaction(self, block_group_index, tx)
+            .await?;
         let block_group = self.get_block_group_descriptor(block_group_index);
         block_group.set_inode_bitmap_checksum(checksum);
-        block_group.write(self).await?;
         Ok(())
+    }
+
+    #[maybe_async::maybe_async]
+    async fn clear_blocks_in_transaction(
+        &self,
+        block_index: FsBlockIndex,
+        num_blocks: NonZeroU32,
+        tx: &mut Transaction,
+    ) -> Result<(), Ext4Error> {
+        let zeroes = vec![0; self.0.superblock.block_size().to_usize()];
+        for i in 0..num_blocks.get() {
+            tx.write_to_block(
+                block_index
+                    .checked_add(u64::from(i))
+                    .ok_or(Ext4Error::NoSpace)?,
+                0,
+                &zeroes,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    fn restore_block_bitmap_checksum(
+        block_group: &BlockGroupDescriptor,
+        checksum: TruncatedChecksum,
+    ) {
+        match checksum {
+            TruncatedChecksum::Truncated(checksum) => {
+                block_group.set_block_bitmap_checksum(u32::from(checksum));
+            }
+            TruncatedChecksum::Full(checksum) => {
+                block_group.set_block_bitmap_checksum(checksum);
+            }
+        }
+    }
+
+    fn restore_inode_bitmap_checksum(
+        block_group: &BlockGroupDescriptor,
+        checksum: TruncatedChecksum,
+    ) {
+        match checksum {
+            TruncatedChecksum::Truncated(checksum) => {
+                block_group.set_inode_bitmap_checksum(u32::from(checksum));
+            }
+            TruncatedChecksum::Full(checksum) => {
+                block_group.set_inode_bitmap_checksum(checksum);
+            }
+        }
     }
 
     #[expect(unused)]
@@ -656,27 +708,49 @@ impl Ext4 {
                 else {
                     continue;
                 };
-                inode_bitmap_handle.set(inode_num, true, self).await?;
-                self.update_inode_bitmap_checksum(bg_id, inode_bitmap_handle)
+
+                let old_unused_inodes = bg.unused_inodes_count();
+                let old_inode_bitmap_checksum = bg.inode_bitmap_checksum();
+                let old_total_free_inodes =
+                    self.0.superblock.free_inodes_count();
+                let mut tx = self.begin_transaction()?;
+
+                inode_bitmap_handle
+                    .set_in_transaction(inode_num, true, &mut tx)
                     .await?;
+                if let Err(err) = self
+                    .update_inode_bitmap_checksum_in_transaction(
+                        bg_id,
+                        inode_bitmap_handle,
+                        &tx,
+                    )
+                    .await
+                {
+                    Self::restore_inode_bitmap_checksum(
+                        bg,
+                        old_inode_bitmap_checksum,
+                    );
+                    return Err(err);
+                }
+
                 bg.set_free_inodes_count(free_inodes.checked_sub(1).unwrap());
                 if self
                     .0
                     .superblock
                     .inodes_per_block_group()
                     .get()
-                    .checked_sub(bg.unused_inodes_count())
+                    .checked_sub(old_unused_inodes)
                     .ok_or(
                         CorruptKind::BlockGroupDescriptorTooManyUnusedInodes {
                             block_group_num: bg_id,
-                            num_unused_inodes: bg.unused_inodes_count(),
+                            num_unused_inodes: old_unused_inodes,
                         },
                     )?
                     .checked_sub(1)
                     .ok_or(
                         CorruptKind::BlockGroupDescriptorTooManyUnusedInodes {
                             block_group_num: bg_id,
-                            num_unused_inodes: bg.unused_inodes_count(),
+                            num_unused_inodes: old_unused_inodes,
                         },
                     )?
                     <= inode_num
@@ -696,12 +770,51 @@ impl Ext4 {
                 if matches!(inode_type, FileType::Directory) {
                     bg.set_used_dirs_count(used_dirs.saturating_add(1));
                 }
-                bg.write(self).await?;
-                let total_free_inodes = self.0.superblock.free_inodes_count();
                 self.0.superblock.set_free_inodes_count(
-                    total_free_inodes.checked_sub(1).unwrap(),
+                    old_total_free_inodes.checked_sub(1).unwrap(),
                 );
-                self.0.superblock.write(self).await?;
+
+                if let Err(err) = bg.write_in_transaction(self, &mut tx).await {
+                    bg.set_free_inodes_count(free_inodes);
+                    bg.set_used_dirs_count(used_dirs);
+                    bg.set_unused_inodes_count(old_unused_inodes);
+                    Self::restore_inode_bitmap_checksum(
+                        bg,
+                        old_inode_bitmap_checksum,
+                    );
+                    self.0
+                        .superblock
+                        .set_free_inodes_count(old_total_free_inodes);
+                    return Err(err);
+                }
+                if let Err(err) =
+                    self.0.superblock.write_in_transaction(self, &mut tx).await
+                {
+                    bg.set_free_inodes_count(free_inodes);
+                    bg.set_used_dirs_count(used_dirs);
+                    bg.set_unused_inodes_count(old_unused_inodes);
+                    Self::restore_inode_bitmap_checksum(
+                        bg,
+                        old_inode_bitmap_checksum,
+                    );
+                    self.0
+                        .superblock
+                        .set_free_inodes_count(old_total_free_inodes);
+                    return Err(err);
+                }
+                if let Err(err) = tx.commit().await {
+                    bg.set_free_inodes_count(free_inodes);
+                    bg.set_used_dirs_count(used_dirs);
+                    bg.set_unused_inodes_count(old_unused_inodes);
+                    Self::restore_inode_bitmap_checksum(
+                        bg,
+                        old_inode_bitmap_checksum,
+                    );
+                    self.0
+                        .superblock
+                        .set_free_inodes_count(old_total_free_inodes);
+                    return Err(err);
+                }
 
                 return Ok(InodeIndex::try_from(
                     inode_num
@@ -735,27 +848,59 @@ impl Ext4 {
             get_inode_block_group_location(&self.0.superblock, inode.index)?;
         let inode_bitmap_handle =
             self.get_inode_bitmap_handle(block_group_index);
-        inode_bitmap_handle.set(inode_offset, false, self).await?;
-        self.update_inode_bitmap_checksum(
-            block_group_index,
-            inode_bitmap_handle,
-        )
-        .await?;
-        // Set number of free inodes in block group
         let bg = self.get_block_group_descriptor(block_group_index);
         let free_inodes = bg.free_inodes_count();
+        let used_dirs = bg.used_dirs_count();
+        let old_inode_bitmap_checksum = bg.inode_bitmap_checksum();
+        let total_free_inodes = self.0.superblock.free_inodes_count();
+        let mut tx = self.begin_transaction()?;
+
+        inode_bitmap_handle
+            .set_in_transaction(inode_offset, false, &mut tx)
+            .await?;
+        if let Err(err) = self
+            .update_inode_bitmap_checksum_in_transaction(
+                block_group_index,
+                inode_bitmap_handle,
+                &tx,
+            )
+            .await
+        {
+            Self::restore_inode_bitmap_checksum(bg, old_inode_bitmap_checksum);
+            return Err(err);
+        }
+
         bg.set_free_inodes_count(free_inodes.saturating_add(1));
         if inode.file_type().is_dir() {
-            let used_dirs = bg.used_dirs_count();
             bg.set_used_dirs_count(used_dirs.saturating_sub(1));
         }
-        bg.write(self).await?;
-        // Set number of free inodes in superblock
-        let total_free_inodes = self.0.superblock.free_inodes_count();
         self.0
             .superblock
             .set_free_inodes_count(total_free_inodes.saturating_add(1));
-        self.0.superblock.write(self).await?;
+
+        if let Err(err) = bg.write_in_transaction(self, &mut tx).await {
+            bg.set_free_inodes_count(free_inodes);
+            bg.set_used_dirs_count(used_dirs);
+            Self::restore_inode_bitmap_checksum(bg, old_inode_bitmap_checksum);
+            self.0.superblock.set_free_inodes_count(total_free_inodes);
+            return Err(err);
+        }
+        if let Err(err) =
+            self.0.superblock.write_in_transaction(self, &mut tx).await
+        {
+            bg.set_free_inodes_count(free_inodes);
+            bg.set_used_dirs_count(used_dirs);
+            Self::restore_inode_bitmap_checksum(bg, old_inode_bitmap_checksum);
+            self.0.superblock.set_free_inodes_count(total_free_inodes);
+            return Err(err);
+        }
+        if let Err(err) = tx.commit().await {
+            bg.set_free_inodes_count(free_inodes);
+            bg.set_used_dirs_count(used_dirs);
+            Self::restore_inode_bitmap_checksum(bg, old_inode_bitmap_checksum);
+            self.0.superblock.set_free_inodes_count(total_free_inodes);
+            return Err(err);
+        }
         Ok(())
     }
 
@@ -809,20 +954,64 @@ impl Ext4 {
         if block_bitmap_handle.query(block_offset, self).await? {
             return Err(Ext4Error::AlreadyExists);
         }
-        block_bitmap_handle.set(block_offset, true, self).await?;
-        self.update_block_bitmap_checksum(
-            block_group_index,
-            block_bitmap_handle,
-        )
-        .await?;
-        // Set number of free blocks in block group
+
         let bg = self.get_block_group_descriptor(block_group_index);
         let free_blocks = bg.free_blocks_count();
+        let old_block_bitmap_checksum = bg.block_bitmap_checksum();
+        let total_free_blocks = self.0.superblock.free_blocks_count();
+        let mut tx = self.begin_transaction()?;
+
+        block_bitmap_handle
+            .set_in_transaction(block_offset, true, &mut tx)
+            .await?;
+        if let Err(err) = self
+            .update_block_bitmap_checksum_in_transaction(
+                block_group_index,
+                block_bitmap_handle,
+                &tx,
+            )
+            .await
+        {
+            Self::restore_block_bitmap_checksum(bg, old_block_bitmap_checksum);
+            return Err(err);
+        }
+
         bg.set_free_blocks_count(free_blocks.checked_sub(1).unwrap());
-        bg.write(self).await?;
-        self.0.superblock.dec_free_blocks_count(1);
-        self.0.superblock.write(self).await?;
-        self.clear_block(block).await
+        self.0
+            .superblock
+            .set_free_blocks_count(total_free_blocks.checked_sub(1).unwrap());
+
+        if let Err(err) = bg.write_in_transaction(self, &mut tx).await {
+            bg.set_free_blocks_count(free_blocks);
+            Self::restore_block_bitmap_checksum(bg, old_block_bitmap_checksum);
+            self.0.superblock.set_free_blocks_count(total_free_blocks);
+            return Err(err);
+        }
+        if let Err(err) =
+            self.0.superblock.write_in_transaction(self, &mut tx).await
+        {
+            bg.set_free_blocks_count(free_blocks);
+            Self::restore_block_bitmap_checksum(bg, old_block_bitmap_checksum);
+            self.0.superblock.set_free_blocks_count(total_free_blocks);
+            return Err(err);
+        }
+
+        let one = NonZeroU32::new(1).unwrap();
+        if let Err(err) =
+            self.clear_blocks_in_transaction(block, one, &mut tx).await
+        {
+            bg.set_free_blocks_count(free_blocks);
+            Self::restore_block_bitmap_checksum(bg, old_block_bitmap_checksum);
+            self.0.superblock.set_free_blocks_count(total_free_blocks);
+            return Err(err);
+        }
+        if let Err(err) = tx.commit().await {
+            bg.set_free_blocks_count(free_blocks);
+            Self::restore_block_bitmap_checksum(bg, old_block_bitmap_checksum);
+            self.0.superblock.set_free_blocks_count(total_free_blocks);
+            return Err(err);
+        }
+        Ok(())
     }
 
     #[maybe_async::maybe_async]
@@ -858,17 +1047,77 @@ impl Ext4 {
                 else {
                     continue;
                 };
-                block_bitmap_handle.set(block_num, true, self).await?;
-                self.update_block_bitmap_checksum(bg_id, block_bitmap_handle)
-                    .await?;
-                bg.set_free_blocks_count(free_blocks.get() - 1u32);
-                bg.write(self).await?;
-                self.0.superblock.dec_free_blocks_count(1);
-                self.0.superblock.write(self).await?;
-
+                let old_block_bitmap_checksum = bg.block_bitmap_checksum();
+                let total_free_blocks = self.0.superblock.free_blocks_count();
                 let block_index =
                     self.block_index_from_group_offset(bg_id, block_num)?;
-                self.clear_block(block_index).await?;
+                let mut tx = self.begin_transaction()?;
+
+                block_bitmap_handle
+                    .set_in_transaction(block_num, true, &mut tx)
+                    .await?;
+                if let Err(err) = self
+                    .update_block_bitmap_checksum_in_transaction(
+                        bg_id,
+                        block_bitmap_handle,
+                        &tx,
+                    )
+                    .await
+                {
+                    Self::restore_block_bitmap_checksum(
+                        bg,
+                        old_block_bitmap_checksum,
+                    );
+                    return Err(err);
+                }
+
+                bg.set_free_blocks_count(free_blocks.get() - 1u32);
+                self.0.superblock.set_free_blocks_count(
+                    total_free_blocks.checked_sub(1).unwrap(),
+                );
+
+                if let Err(err) = bg.write_in_transaction(self, &mut tx).await {
+                    bg.set_free_blocks_count(free_blocks.get());
+                    Self::restore_block_bitmap_checksum(
+                        bg,
+                        old_block_bitmap_checksum,
+                    );
+                    self.0.superblock.set_free_blocks_count(total_free_blocks);
+                    return Err(err);
+                }
+                if let Err(err) =
+                    self.0.superblock.write_in_transaction(self, &mut tx).await
+                {
+                    bg.set_free_blocks_count(free_blocks.get());
+                    Self::restore_block_bitmap_checksum(
+                        bg,
+                        old_block_bitmap_checksum,
+                    );
+                    self.0.superblock.set_free_blocks_count(total_free_blocks);
+                    return Err(err);
+                }
+                let one = NonZeroU32::new(1).unwrap();
+                if let Err(err) = self
+                    .clear_blocks_in_transaction(block_index, one, &mut tx)
+                    .await
+                {
+                    bg.set_free_blocks_count(free_blocks.get());
+                    Self::restore_block_bitmap_checksum(
+                        bg,
+                        old_block_bitmap_checksum,
+                    );
+                    self.0.superblock.set_free_blocks_count(total_free_blocks);
+                    return Err(err);
+                }
+                if let Err(err) = tx.commit().await {
+                    bg.set_free_blocks_count(free_blocks.get());
+                    Self::restore_block_bitmap_checksum(
+                        bg,
+                        old_block_bitmap_checksum,
+                    );
+                    self.0.superblock.set_free_blocks_count(total_free_blocks);
+                    return Err(err);
+                }
                 return Ok(block_index);
             }
 
@@ -912,25 +1161,97 @@ impl Ext4 {
                 else {
                     continue;
                 };
+                let old_block_bitmap_checksum = bg.block_bitmap_checksum();
+                let total_free_blocks = self.0.superblock.free_blocks_count();
+                let block_index =
+                    self.block_index_from_group_offset(bg_id, block_num)?;
+                let mut tx = self.begin_transaction()?;
+
                 for i in 0..num_blocks.get() {
-                    block_bitmap_handle
-                        .set(block_num.checked_add(i).unwrap(), true, self)
-                        .await?;
+                    if let Err(err) = block_bitmap_handle
+                        .set_in_transaction(
+                            block_num.checked_add(i).unwrap(),
+                            true,
+                            &mut tx,
+                        )
+                        .await
+                    {
+                        Self::restore_block_bitmap_checksum(
+                            bg,
+                            old_block_bitmap_checksum,
+                        );
+                        return Err(err);
+                    }
                 }
-                self.update_block_bitmap_checksum(bg_id, block_bitmap_handle)
-                    .await?;
+                if let Err(err) = self
+                    .update_block_bitmap_checksum_in_transaction(
+                        bg_id,
+                        block_bitmap_handle,
+                        &tx,
+                    )
+                    .await
+                {
+                    Self::restore_block_bitmap_checksum(
+                        bg,
+                        old_block_bitmap_checksum,
+                    );
+                    return Err(err);
+                }
+
                 bg.set_free_blocks_count(
                     free_blocks.checked_sub(num_blocks.get()).unwrap(),
                 );
-                bg.write(self).await?;
-                self.0
-                    .superblock
-                    .dec_free_blocks_count(u64::from(num_blocks.get()));
-                self.0.superblock.write(self).await?;
-                let block_index =
-                    self.block_index_from_group_offset(bg_id, block_num)?;
-                if clear {
-                    self.clear_blocks(block_index, num_blocks).await?;
+                self.0.superblock.set_free_blocks_count(
+                    total_free_blocks
+                        .checked_sub(u64::from(num_blocks.get()))
+                        .unwrap(),
+                );
+
+                if let Err(err) = bg.write_in_transaction(self, &mut tx).await {
+                    bg.set_free_blocks_count(free_blocks);
+                    Self::restore_block_bitmap_checksum(
+                        bg,
+                        old_block_bitmap_checksum,
+                    );
+                    self.0.superblock.set_free_blocks_count(total_free_blocks);
+                    return Err(err);
+                }
+                if let Err(err) =
+                    self.0.superblock.write_in_transaction(self, &mut tx).await
+                {
+                    bg.set_free_blocks_count(free_blocks);
+                    Self::restore_block_bitmap_checksum(
+                        bg,
+                        old_block_bitmap_checksum,
+                    );
+                    self.0.superblock.set_free_blocks_count(total_free_blocks);
+                    return Err(err);
+                }
+                if clear
+                    && let Err(err) = self
+                        .clear_blocks_in_transaction(
+                            block_index,
+                            num_blocks,
+                            &mut tx,
+                        )
+                        .await
+                {
+                    bg.set_free_blocks_count(free_blocks);
+                    Self::restore_block_bitmap_checksum(
+                        bg,
+                        old_block_bitmap_checksum,
+                    );
+                    self.0.superblock.set_free_blocks_count(total_free_blocks);
+                    return Err(err);
+                }
+                if let Err(err) = tx.commit().await {
+                    bg.set_free_blocks_count(free_blocks);
+                    Self::restore_block_bitmap_checksum(
+                        bg,
+                        old_block_bitmap_checksum,
+                    );
+                    self.0.superblock.set_free_blocks_count(total_free_blocks);
+                    return Err(err);
                 }
                 return Ok(block_index);
             }
@@ -982,6 +1303,7 @@ impl Ext4 {
         Err(Ext4Error::NoSpace)
     }
 
+    #[expect(unused)]
     #[maybe_async::maybe_async]
     pub(crate) async fn clear_block(
         &self,
@@ -991,6 +1313,7 @@ impl Ext4 {
         self.write_to_block(block_index, 0, &zeroes).await
     }
 
+    #[expect(unused)]
     #[maybe_async::maybe_async]
     pub(crate) async fn clear_blocks(
         &self,
@@ -1021,19 +1344,52 @@ impl Ext4 {
             self.block_block_group_location(block_index)?;
         let block_bitmap_handle =
             self.get_block_bitmap_handle(block_group_index);
-        block_bitmap_handle.set(block_offset, false, self).await?;
-        self.update_block_bitmap_checksum(
-            block_group_index,
-            block_bitmap_handle,
-        )
-        .await?;
-        // Set number of free blocks in block group
         let bg = self.get_block_group_descriptor(block_group_index);
         let free_blocks = bg.free_blocks_count();
+        let old_block_bitmap_checksum = bg.block_bitmap_checksum();
+        let total_free_blocks = self.0.superblock.free_blocks_count();
+        let mut tx = self.begin_transaction()?;
+
+        block_bitmap_handle
+            .set_in_transaction(block_offset, false, &mut tx)
+            .await?;
+        if let Err(err) = self
+            .update_block_bitmap_checksum_in_transaction(
+                block_group_index,
+                block_bitmap_handle,
+                &tx,
+            )
+            .await
+        {
+            Self::restore_block_bitmap_checksum(bg, old_block_bitmap_checksum);
+            return Err(err);
+        }
+
         bg.set_free_blocks_count(free_blocks.saturating_add(1));
-        bg.write(self).await?;
-        self.0.superblock.inc_free_blocks_count(1);
-        self.0.superblock.write(self).await?;
+        self.0
+            .superblock
+            .set_free_blocks_count(total_free_blocks.saturating_add(1));
+
+        if let Err(err) = bg.write_in_transaction(self, &mut tx).await {
+            bg.set_free_blocks_count(free_blocks);
+            Self::restore_block_bitmap_checksum(bg, old_block_bitmap_checksum);
+            self.0.superblock.set_free_blocks_count(total_free_blocks);
+            return Err(err);
+        }
+        if let Err(err) =
+            self.0.superblock.write_in_transaction(self, &mut tx).await
+        {
+            bg.set_free_blocks_count(free_blocks);
+            Self::restore_block_bitmap_checksum(bg, old_block_bitmap_checksum);
+            self.0.superblock.set_free_blocks_count(total_free_blocks);
+            return Err(err);
+        }
+        if let Err(err) = tx.commit().await {
+            bg.set_free_blocks_count(free_blocks);
+            Self::restore_block_bitmap_checksum(bg, old_block_bitmap_checksum);
+            self.0.superblock.set_free_blocks_count(total_free_blocks);
+            return Err(err);
+        }
         Ok(())
     }
 
@@ -1049,29 +1405,71 @@ impl Ext4 {
             self.block_block_group_location(block_index)?;
         let block_bitmap_handle =
             self.get_block_bitmap_handle(block_group_index);
-        for i in 0..num_blocks.get() {
-            block_bitmap_handle
-                .set(block_offset.checked_add(i).unwrap(), false, self)
-                .await?;
-        }
-        self.update_block_bitmap_checksum(
-            block_group_index,
-            block_bitmap_handle,
-        )
-        .await?;
-        // Set number of free blocks in block group
         let bg = self.get_block_group_descriptor(block_group_index);
         let free_blocks = bg.free_blocks_count();
+        let old_block_bitmap_checksum = bg.block_bitmap_checksum();
+        let total_free_blocks = self.0.superblock.free_blocks_count();
+        let mut tx = self.begin_transaction()?;
+
+        for i in 0..num_blocks.get() {
+            if let Err(err) = block_bitmap_handle
+                .set_in_transaction(
+                    block_offset.checked_add(i).unwrap(),
+                    false,
+                    &mut tx,
+                )
+                .await
+            {
+                Self::restore_block_bitmap_checksum(
+                    bg,
+                    old_block_bitmap_checksum,
+                );
+                return Err(err);
+            }
+        }
+        if let Err(err) = self
+            .update_block_bitmap_checksum_in_transaction(
+                block_group_index,
+                block_bitmap_handle,
+                &tx,
+            )
+            .await
+        {
+            Self::restore_block_bitmap_checksum(bg, old_block_bitmap_checksum);
+            return Err(err);
+        }
+
         bg.set_free_blocks_count(
             free_blocks
                 .checked_add(num_blocks.get())
                 .ok_or(Ext4Error::NoSpace)?,
         );
-        bg.write(self).await?;
-        self.0
-            .superblock
-            .inc_free_blocks_count(u64::from(num_blocks.get()));
-        self.0.superblock.write(self).await?;
+        self.0.superblock.set_free_blocks_count(
+            total_free_blocks
+                .checked_add(u64::from(num_blocks.get()))
+                .ok_or(Ext4Error::NoSpace)?,
+        );
+
+        if let Err(err) = bg.write_in_transaction(self, &mut tx).await {
+            bg.set_free_blocks_count(free_blocks);
+            Self::restore_block_bitmap_checksum(bg, old_block_bitmap_checksum);
+            self.0.superblock.set_free_blocks_count(total_free_blocks);
+            return Err(err);
+        }
+        if let Err(err) =
+            self.0.superblock.write_in_transaction(self, &mut tx).await
+        {
+            bg.set_free_blocks_count(free_blocks);
+            Self::restore_block_bitmap_checksum(bg, old_block_bitmap_checksum);
+            self.0.superblock.set_free_blocks_count(total_free_blocks);
+            return Err(err);
+        }
+        if let Err(err) = tx.commit().await {
+            bg.set_free_blocks_count(free_blocks);
+            Self::restore_block_bitmap_checksum(bg, old_block_bitmap_checksum);
+            self.0.superblock.set_free_blocks_count(total_free_blocks);
+            return Err(err);
+        }
         Ok(())
     }
 
