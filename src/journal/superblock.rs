@@ -9,10 +9,8 @@
 use crate::Ext4;
 use crate::checksum::Checksum;
 use crate::error::{CorruptKind, Ext4Error, IncompatibleKind};
+use crate::file_blocks::FileBlocks;
 use crate::inode::Inode;
-#[cfg(not(feature = "sync"))]
-use crate::iters::AsyncIterator;
-use crate::iters::file_blocks::FileBlocks;
 use crate::journal::block_header::{JournalBlockHeader, JournalBlockType};
 use crate::util::read_u32be;
 use crate::uuid::Uuid;
@@ -72,16 +70,16 @@ impl JournalSuperblock {
         fs: &Ext4,
         journal_inode: &Inode,
     ) -> Result<Self, Ext4Error> {
-        // Get an iterator over the journal's block indices.
-        let mut journal_block_iter =
-            FileBlocks::new(fs.clone(), journal_inode)?;
+        let num_journal_blocks = journal_inode.file_size_in_blocks(fs)?;
+        if num_journal_blocks == 0 {
+            return Err(CorruptKind::JournalSize.into());
+        }
 
         // Read the first 1024 bytes of the first block. This is the
         // journal's superblock.
-        let block_index = journal_block_iter
-            .next()
-            .await
-            .ok_or(CorruptKind::JournalSize)??;
+        let block_index = FileBlocks::from_inode(journal_inode, fs.clone())?
+            .get_block(0)
+            .await?;
         let mut block = vec![0; SUPERBLOCK_SIZE];
         fs.read_from_block(block_index, 0, &mut block).await?;
 
