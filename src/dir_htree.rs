@@ -13,16 +13,14 @@ use crate::dir_entry::{DirEntry, DirEntryName};
 use crate::dir_entry_hash::HashAlg;
 use crate::error::{CorruptKind, Ext4Error};
 use crate::extent::Extent;
+use crate::file_blocks::FileBlocks;
 use crate::inode::{Inode, InodeFlags, InodeIndex};
 #[cfg(not(feature = "sync"))]
 use crate::iters::AsyncIterator;
 use crate::iters::extents::Extents;
-use crate::iters::file_blocks::FileBlocks;
 use crate::path::PathBuf;
 use crate::sync::PtrPrimitive;
-use crate::util::{
-    read_u16le, read_u32le, usize_from_u32, write_u16le, write_u32le,
-};
+use crate::util::{read_u16le, read_u32le, write_u16le, write_u32le};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -248,11 +246,13 @@ async fn root_block_index(
     fs: &Ext4,
     inode: &Inode,
 ) -> Result<FsBlockIndex, Ext4Error> {
-    let mut file_blocks = FileBlocks::new(fs.clone(), inode)?;
-    file_blocks
-        .next()
+    if inode.file_size_in_blocks(fs)? == 0 {
+        return Err(CorruptKind::DirEntry(inode.index).into());
+    }
+
+    FileBlocks::from_inode(inode, fs.clone())?
+        .get_block(0)
         .await
-        .ok_or(CorruptKind::DirEntry(inode.index))?
 }
 
 /// Read the block containing the root node of an htree into
@@ -355,13 +355,9 @@ async fn block_from_file_block(
             .ok_or(CorruptKind::DirEntry(inode.index))?;
         Ok(absolute_block)
     } else {
-        #[expect(clippy::allow_attributes)]
-        #[allow(unused_mut)]
-        let mut block_map = FileBlocks::new(fs.clone(), inode)?;
-        block_map
-            .nth(usize_from_u32(relative_block))
+        FileBlocks::from_inode(inode, fs.clone())?
+            .get_block(relative_block)
             .await
-            .ok_or(CorruptKind::DirEntry(inode.index))?
     }
 }
 
