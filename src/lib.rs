@@ -141,6 +141,7 @@ mod reader;
 mod resolve;
 pub mod superblock;
 pub mod sync;
+mod transaction;
 mod util;
 mod uuid;
 mod writer;
@@ -174,6 +175,7 @@ use mmp::Mmp;
 use path::{Path, PathBuf};
 use superblock::Superblock;
 use sync::PtrPrimitive;
+use transaction::Transaction;
 use util::{u64_from_usize, usize_from_u32};
 
 pub use dir_entry::{DirEntry, DirEntryName, DirEntryNameError};
@@ -327,11 +329,19 @@ impl Ext4 {
     ///
     /// If the loaded journal contains a replacement for the block, this returns
     /// the journal block. Otherwise it returns `block_index` unchanged.
-    fn map_block_index_for_read(
+    pub(crate) fn map_block_index_for_read(
         &self,
         block_index: FsBlockIndex,
     ) -> FsBlockIndex {
         self.0.journal.map_block_index(block_index)
+    }
+
+    pub(crate) fn begin_transaction(&self) -> Result<Transaction, Ext4Error> {
+        if self.0.writer.is_none() {
+            return Err(Ext4Error::Readonly);
+        }
+
+        Ok(Transaction::new(self.clone()))
     }
 
     /// Read data from a block, applying any loaded journal remapping.
@@ -354,7 +364,7 @@ impl Ext4 {
     /// If any of these conditions are violated, a `CorruptKind::BlockRead`
     /// error is returned.
     #[maybe_async::maybe_async]
-    async fn read_from_block(
+    pub(crate) async fn read_from_block(
         &self,
         original_block_index: FsBlockIndex,
         offset_within_block: u32,
@@ -373,7 +383,7 @@ impl Ext4 {
     /// Read data from the exact on-disk block index without applying journal
     /// remapping.
     #[maybe_async::maybe_async]
-    async fn read_from_block_raw(
+    pub(crate) async fn read_from_block_raw(
         &self,
         block_index: FsBlockIndex,
         offset_within_block: u32,
@@ -449,7 +459,7 @@ impl Ext4 {
 
     /// Read a whole block, applying any loaded journal remapping.
     #[maybe_async::maybe_async]
-    async fn read_block(
+    pub(crate) async fn read_block(
         &self,
         original_block_index: FsBlockIndex,
     ) -> Result<Vec<u8>, Ext4Error> {
@@ -465,7 +475,7 @@ impl Ext4 {
     /// Unlike [`Self::read_from_block`], this does not consult the loaded
     /// journal overlay. Writes target the home block directly.
     #[maybe_async::maybe_async]
-    async fn write_to_block(
+    pub(crate) async fn write_to_block(
         &self,
         block_index: FsBlockIndex,
         offset_within_block: u32,
