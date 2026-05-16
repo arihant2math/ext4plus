@@ -323,9 +323,20 @@ impl Ext4 {
         Inode::read(self, root_inode_index).await
     }
 
-    /// Read data from a block.
+    /// Map a logical filesystem block to the block that should be read.
     ///
-    /// `block_index`: an absolute block within the filesystem.
+    /// If the loaded journal contains a replacement for the block, this returns
+    /// the journal block. Otherwise it returns `block_index` unchanged.
+    fn map_block_index_for_read(
+        &self,
+        block_index: FsBlockIndex,
+    ) -> FsBlockIndex {
+        self.0.journal.map_block_index(block_index)
+    }
+
+    /// Read data from a block, applying any loaded journal remapping.
+    ///
+    /// `original_block_index`: an absolute block within the filesystem.
     ///
     /// `offset_within_block`: the byte offset within the block to start
     /// reading from.
@@ -349,8 +360,42 @@ impl Ext4 {
         offset_within_block: u32,
         dst: &mut [u8],
     ) -> Result<(), Ext4Error> {
-        let block_index = self.0.journal.map_block_index(original_block_index);
+        let block_index = self.map_block_index_for_read(original_block_index);
+        self.read_from_block_impl(
+            block_index,
+            original_block_index,
+            offset_within_block,
+            dst,
+        )
+        .await
+    }
 
+    /// Read data from the exact on-disk block index without applying journal
+    /// remapping.
+    #[maybe_async::maybe_async]
+    async fn read_from_block_raw(
+        &self,
+        block_index: FsBlockIndex,
+        offset_within_block: u32,
+        dst: &mut [u8],
+    ) -> Result<(), Ext4Error> {
+        self.read_from_block_impl(
+            block_index,
+            block_index,
+            offset_within_block,
+            dst,
+        )
+        .await
+    }
+
+    #[maybe_async::maybe_async]
+    async fn read_from_block_impl(
+        &self,
+        block_index: FsBlockIndex,
+        original_block_index: FsBlockIndex,
+        offset_within_block: u32,
+        dst: &mut [u8],
+    ) -> Result<(), Ext4Error> {
         let err = || {
             Ext4Error::from(CorruptKind::BlockRead {
                 block_index,
@@ -386,7 +431,7 @@ impl Ext4 {
             return Err(err());
         }
 
-        // Read the block
+        // Read the block.
         self.0
             .reader
             .read(
@@ -402,7 +447,7 @@ impl Ext4 {
         Ok(())
     }
 
-    /// Read a whole block
+    /// Read a whole block, applying any loaded journal remapping.
     #[maybe_async::maybe_async]
     async fn read_block(
         &self,
@@ -415,16 +460,34 @@ impl Ext4 {
         Ok(block)
     }
 
-    /// Write data to a block.
+    /// Write data to the exact on-disk block index.
+    ///
+    /// Unlike [`Self::read_from_block`], this does not consult the loaded
+    /// journal overlay. Writes target the home block directly.
     #[maybe_async::maybe_async]
     async fn write_to_block(
         &self,
+        block_index: FsBlockIndex,
+        offset_within_block: u32,
+        src: &[u8],
+    ) -> Result<(), Ext4Error> {
+        self.write_to_block_impl(
+            block_index,
+            block_index,
+            offset_within_block,
+            src,
+        )
+        .await
+    }
+
+    #[maybe_async::maybe_async]
+    async fn write_to_block_impl(
+        &self,
+        block_index: FsBlockIndex,
         original_block_index: FsBlockIndex,
         offset_within_block: u32,
         src: &[u8],
     ) -> Result<(), Ext4Error> {
-        let block_index = self.0.journal.map_block_index(original_block_index);
-
         let err = || {
             Ext4Error::from(CorruptKind::BlockWrite {
                 block_index,
@@ -459,7 +522,7 @@ impl Ext4 {
             return Err(err());
         }
 
-        // Write through to underlying storage
+        // Write through to underlying storage.
         if let Some(writer) = &self.0.writer {
             writer
                 .write(
@@ -805,12 +868,12 @@ impl Ext4 {
         Err(Ext4Error::NoSpace)
     }
 
-    /// Tries to allocate `num_blocks` contiguous blocks.
     #[maybe_async::maybe_async]
-    pub(crate) async fn alloc_contiguous_blocks(
+    async fn alloc_contiguous_blocks_inner(
         &self,
         inode_index: InodeIndex,
         num_blocks: NonZeroU32,
+        clear: bool,
     ) -> Result<FsBlockIndex, Ext4Error> {
         let mut bg_id = (inode_index.get() - 1)
             / self.0.superblock.inodes_per_block_group();
@@ -856,12 +919,36 @@ impl Ext4 {
                 self.0.superblock.write(self).await?;
                 let block_index =
                     self.block_index_from_group_offset(bg_id, block_num)?;
-                self.clear_blocks(block_index, num_blocks).await?;
+                if clear {
+                    self.clear_blocks(block_index, num_blocks).await?;
+                }
                 return Ok(block_index);
             }
             bg_id = bg_id.saturating_add(1);
         }
         Err(Ext4Error::NoSpace)
+    }
+
+    /// Tries to allocate `num_blocks` contiguous blocks.
+    #[maybe_async::maybe_async]
+    pub(crate) async fn alloc_contiguous_blocks(
+        &self,
+        inode_index: InodeIndex,
+        num_blocks: NonZeroU32,
+    ) -> Result<FsBlockIndex, Ext4Error> {
+        self.alloc_contiguous_blocks_inner(inode_index, num_blocks, true)
+            .await
+    }
+
+    /// Tries to allocate `num_blocks` contiguous blocks without modifying their contents.
+    #[maybe_async::maybe_async]
+    pub(crate) async fn alloc_contiguous_blocks_uncleared(
+        &self,
+        inode_index: InodeIndex,
+        num_blocks: NonZeroU32,
+    ) -> Result<FsBlockIndex, Ext4Error> {
+        self.alloc_contiguous_blocks_inner(inode_index, num_blocks, false)
+            .await
     }
 
     /// Tries to allocate `num_blocks` contiguous blocks
@@ -1472,7 +1559,7 @@ impl Debug for Ext4 {
 mod tests {
     use super::*;
     use crate::test_util::{
-        load_compressed_filesystem_rw, load_test_disk1_rw_no_fsck,
+        MemRw, load_compressed_filesystem_rw, load_test_disk1_rw_no_fsck,
     };
     use test_util::load_test_disk1;
 
@@ -1685,6 +1772,52 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(data, [5; 4]);
+    }
+
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn test_write_to_block_targets_home_block_not_journal_overlay() {
+        let (mut fs, storage) =
+            load_compressed_filesystem_rw("test_disk_4k_block_journal.bin.zst")
+                .await;
+        crate::sync::PtrPrimitive::get_mut(&mut fs.0)
+            .unwrap()
+            .writer = Some(Box::new(MemRw(storage)));
+
+        let block_index = (0..fs.0.superblock.blocks_count())
+            .find(|&block_index| {
+                fs.map_block_index_for_read(block_index) != block_index
+            })
+            .expect(
+                "expected test filesystem to contain journal remapped blocks",
+            );
+
+        let block_size = fs.0.superblock.block_size().to_usize();
+        let mut overlay_before = vec![0; block_size];
+        fs.read_from_block(block_index, 0, &mut overlay_before)
+            .await
+            .unwrap();
+
+        let mut new_home_data = overlay_before.clone();
+        new_home_data[0] ^= 0xff;
+
+        fs.write_to_block(block_index, 0, &new_home_data)
+            .await
+            .unwrap();
+
+        let mut raw_after = vec![0; block_size];
+        fs.read_from_block_raw(block_index, 0, &mut raw_after)
+            .await
+            .unwrap();
+        assert_eq!(raw_after, new_home_data);
+
+        let mut overlay_after = vec![0; block_size];
+        fs.read_from_block(block_index, 0, &mut overlay_after)
+            .await
+            .unwrap();
+        assert_eq!(overlay_after, overlay_before);
     }
 
     #[maybe_async::test(

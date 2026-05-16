@@ -30,21 +30,29 @@ pub(crate) struct Extent {
 
 impl Extent {
     #[maybe_async::maybe_async]
-    pub(crate) async fn allocate(
+    async fn allocate_inner(
         inode_index: InodeIndex,
         current_block: FileBlockIndex,
         amount: u16,
         fs: &Ext4,
+        clear: bool,
     ) -> Result<Self, Ext4Error> {
         let mut tried_blocks = amount;
         let start_fs_block = loop {
-            match fs
-                .alloc_contiguous_blocks(
+            let result = if clear {
+                fs.alloc_contiguous_blocks(
                     inode_index,
                     NonZeroU32::new(u32::from(tried_blocks)).unwrap(),
                 )
                 .await
-            {
+            } else {
+                fs.alloc_contiguous_blocks_uncleared(
+                    inode_index,
+                    NonZeroU32::new(u32::from(tried_blocks)).unwrap(),
+                )
+                .await
+            };
+            match result {
                 Ok(start_fs) => break start_fs,
                 Err(_) => {
                     if tried_blocks == 0 {
@@ -65,6 +73,27 @@ impl Extent {
         };
         // Insert extent: file-blocks [current_block, current_block + tried_blocks) -> FS blocks [start_fs_block, ...]
         Ok(Self::new(current_block, start_fs_block, tried_blocks))
+    }
+
+    #[maybe_async::maybe_async]
+    pub(crate) async fn allocate(
+        inode_index: InodeIndex,
+        current_block: FileBlockIndex,
+        amount: u16,
+        fs: &Ext4,
+    ) -> Result<Self, Ext4Error> {
+        Self::allocate_inner(inode_index, current_block, amount, fs, true).await
+    }
+
+    #[maybe_async::maybe_async]
+    pub(crate) async fn allocate_uncleared(
+        inode_index: InodeIndex,
+        current_block: FileBlockIndex,
+        amount: u16,
+        fs: &Ext4,
+    ) -> Result<Self, Ext4Error> {
+        Self::allocate_inner(inode_index, current_block, amount, fs, false)
+            .await
     }
 
     pub(crate) fn new(
