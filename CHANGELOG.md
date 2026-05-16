@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## 0.1.0-rc.2
+
 - FIXED: Deleting the metadata of a file (i.e. file block related) when unlinking it.
 - FIXED: Corrupt deletes when freeing block map file blocks.
 - FIXED: Panic if unlinking an inode when the inode id and the directory entry name don't match.
