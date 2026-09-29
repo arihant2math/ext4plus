@@ -47,7 +47,7 @@ async-trait = "0.1"
 bitflags = "2.0"
 crc = "3.0"
 maybe-async = "0.2"
-spin = { version = "0.10", optional = true }
+spin = { version = "0.12", optional = true }
 
 [dev-dependencies]
 anyhow.workspace = true
