@@ -673,6 +673,120 @@ impl Dir {
         get_dir_entry_inode_by_name(&self.fs, &self.inode, name).await
     }
 
+    /// Update this directory's existing ".." entry from `old_parent` to
+    /// `new_parent`, preserving its entries and any htree index.
+    ///
+    /// This is a raw building block for directory rename. The caller must
+    /// serialize namespace changes, prevent directory cycles, move the name
+    /// between the parent directories, and update their link counts. This
+    /// method only changes ".." and the directory block checksum; it does
+    /// not change inode metadata or allocate blocks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Ext4Error::Corrupt`] if the dot entries or block checksum
+    /// are invalid, ".." no longer points to `old_parent`, or a parent index
+    /// is outside the filesystem.
+    /// Returns [`Ext4Error::NotADirectory`] if `new_parent` is not a directory,
+    /// [`Ext4Error::Encrypted`] for encrypted directories, and
+    /// [`Ext4Error::Readonly`] if the directory is immutable or the filesystem
+    /// cannot be written. Storage errors are returned as [`Ext4Error::Io`].
+    /// If a block write fails, this method attempts to restore the original
+    /// on-disk block before returning the storage error.
+    #[maybe_async::maybe_async]
+    pub async fn reparent(
+        &mut self,
+        old_parent: InodeIndex,
+        new_parent: InodeIndex,
+    ) -> Result<(), Ext4Error> {
+        if self.inode.flags().contains(InodeFlags::DIRECTORY_ENCRYPTED) {
+            return Err(Ext4Error::Encrypted);
+        }
+        if self.inode.flags().contains(InodeFlags::IMMUTABLE) {
+            return Err(Ext4Error::Readonly);
+        }
+        if self.fs.0.writer.is_none() {
+            return Err(Ext4Error::Readonly);
+        }
+        let inodes_count = self.fs.0.superblock.inodes_count();
+        if old_parent.get() > inodes_count || new_parent.get() > inodes_count {
+            return Err(dir_entry_error(self.inode.index));
+        }
+
+        let block_size = self.fs.0.superblock.block_size().to_usize();
+        if self.inode.size_in_bytes() < u64::try_from(block_size).unwrap() {
+            return Err(dir_entry_error(self.inode.index));
+        }
+        let block_index = crate::file_blocks::FileBlocks::from_inode(
+            &self.inode,
+            self.fs.clone(),
+        )?
+        .get_block(0)
+        .await?;
+        if block_index == 0 {
+            return Err(dir_entry_error(self.inode.index));
+        }
+        let dir_block = DirBlock {
+            fs: &self.fs,
+            block_index,
+            is_first: true,
+            dir_inode: self.inode.index,
+            has_htree: self.inode.flags().contains(InodeFlags::DIRECTORY_HTREE),
+            checksum_base: self.inode.checksum_base().clone(),
+        };
+        let mut block = vec![0; block_size];
+        dir_block.read(&mut block).await?;
+        dir_block.validate_reparent_layout(&block)?;
+
+        let dotdot_len = usize::from(read_u16le(&block, 16));
+        let mut dotdot_max =
+            checked_sub_usize(block.len(), 12, self.inode.index)?;
+        if !dir_block.has_htree && self.fs.has_metadata_checksums() {
+            dotdot_max = checked_sub_usize(dotdot_max, 12, self.inode.index)?;
+        }
+        if read_u32le(&block, 0) != self.inode.index.get()
+            || read_u16le(&block, 4) != 12
+            || block[6] != 1
+            || block[7] != FileType::Directory.to_dir_entry()
+            || block[8] != b'.'
+            || read_u32le(&block, 12) != old_parent.get()
+            || dotdot_len < 12
+            || dotdot_len > dotdot_max
+            || dotdot_len % 4 != 0
+            || (dir_block.has_htree && dotdot_len != dotdot_max)
+            || block[18] != 2
+            || block[19] != FileType::Directory.to_dir_entry()
+            || &block[20..22] != b".."
+        {
+            return Err(dir_entry_error(self.inode.index));
+        }
+        if !Inode::read(&self.fs, new_parent)
+            .await?
+            .file_type()
+            .is_dir()
+        {
+            return Err(Ext4Error::NotADirectory);
+        }
+        if old_parent == new_parent {
+            return Ok(());
+        }
+
+        // Save the exact home-block bytes; a loaded journal overlay can
+        // differ from the on-disk contents that must be restored on failure.
+        let mut original = vec![0; block_size];
+        self.fs
+            .read_from_block_raw(block_index, 0, &mut original)
+            .await?;
+        write_u32le(&mut block, 12, new_parent.get());
+        dir_block.update_checksum(&mut block)?;
+        if let Err(error) = self.fs.write_to_block(block_index, 0, &block).await
+        {
+            self.fs.write_to_block(block_index, 0, &original).await?;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Create a new directory entry at `name` pointing to `target_inode`.
     /// Increments relevant link counts (`target_inode` always, and `self` if `target_inode` is a directory).
     ///
@@ -1234,8 +1348,171 @@ pub(crate) async fn remove_dir_entry_htree(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::{load_test_disk1, load_test_disk1_rw};
+    use crate::test_util::{
+        load_compressed_filesystem_rw, load_test_disk1, load_test_disk1_rw,
+    };
     use crate::{FollowSymlinks, InodeCreationOptions, InodeMode};
+
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn test_reparent_rejects_corrupt_blocks_without_writing() {
+        let (fs, data) =
+            load_compressed_filesystem_rw("test_disk1.bin.zst").await;
+        let root = fs.read_root_inode().await.unwrap().index;
+        let new_parent = fs
+            .path_to_inode("/dir1".try_into().unwrap(), FollowSymlinks::All)
+            .await
+            .unwrap()
+            .index;
+        let non_directory = fs
+            .path_to_inode(
+                "/small_file".try_into().unwrap(),
+                FollowSymlinks::All,
+            )
+            .await
+            .unwrap()
+            .index;
+        for name in ["/dir1", "/medium_dir"] {
+            let inode = fs
+                .path_to_inode(name.try_into().unwrap(), FollowSymlinks::All)
+                .await
+                .unwrap();
+            let block_index =
+                crate::file_blocks::FileBlocks::from_inode(&inode, fs.clone())
+                    .unwrap()
+                    .get_block(0)
+                    .await
+                    .unwrap();
+            let block_size = fs.superblock().block_size().to_usize();
+            let dir_block = DirBlock {
+                fs: &fs,
+                block_index,
+                is_first: true,
+                dir_inode: inode.index,
+                has_htree: inode.flags().contains(InodeFlags::DIRECTORY_HTREE),
+                checksum_base: inode.checksum_base().clone(),
+            };
+            let mut original = vec![0; block_size];
+            dir_block.read(&mut original).await.unwrap();
+            let mut dir = Dir::open_inode(&fs, inode).unwrap();
+            for damage in 0..11 {
+                let mut block = original.clone();
+                match damage {
+                    0 => block[8] = b'!',
+                    1 => write_u32le(&mut block, 12, new_parent.get()),
+                    2 => block[24] ^= 1,
+                    3 if dir_block.has_htree => {
+                        // An invalid count must return an error, not panic
+                        // while slicing the htree root for its checksum.
+                        write_u16le(&mut block, 0x22, u16::MAX);
+                    }
+                    4 if dir_block.has_htree => {
+                        let limit =
+                            read_u16le(&block, 0x20).checked_sub(1).unwrap();
+                        write_u16le(&mut block, 0x20, limit);
+                    }
+                    5 if dir_block.has_htree => block[0x1d] = 9,
+                    6 if dir_block.has_htree => block[0x1f] = 1,
+                    7 if !dir_block.has_htree => {
+                        write_u16le(
+                            &mut block,
+                            16,
+                            u16::try_from(block_size.checked_sub(12).unwrap())
+                                .unwrap(),
+                        );
+                    }
+                    8 if !dir_block.has_htree => {
+                        let marker = block_size.checked_sub(5).unwrap();
+                        block[marker] = 0;
+                    }
+                    9 if dir_block.has_htree => {
+                        // The root index is hidden inside the '..' record.
+                        write_u16le(&mut block, 16, 12);
+                    }
+                    10 => write_u32le(&mut block, 12, non_directory.get()),
+                    _ => continue,
+                }
+                if damage != 2 && damage != 3 {
+                    // Forge a valid checksum independently of the layout
+                    // validator: structural corruption must still be rejected.
+                    let mut checksum = dir_block.checksum_base.clone();
+                    if dir_block.has_htree {
+                        let count = usize::from(read_u16le(&block, 0x22));
+                        let end = 32usize
+                            .checked_add(count.checked_mul(8).unwrap())
+                            .unwrap();
+                        let tail = block_size.checked_sub(8).unwrap();
+                        checksum.update(&block[..end]);
+                        checksum.update_u32_le(read_u32le(&block, tail));
+                        checksum.update_u32_le(0);
+                    } else {
+                        let tail = block_size.checked_sub(12).unwrap();
+                        checksum.update(&block[..tail]);
+                    }
+                    let offset = block_size.checked_sub(4).unwrap();
+                    write_u32le(&mut block, offset, checksum.finalize());
+                }
+                fs.write_to_block(block_index, 0, &block).await.unwrap();
+                let before = data.lock().unwrap().clone();
+                let result = if damage == 10 {
+                    dir.reparent(non_directory, non_directory).await
+                } else {
+                    dir.reparent(root, new_parent).await
+                };
+                if damage == 10 {
+                    assert!(matches!(result, Err(Ext4Error::NotADirectory)));
+                } else {
+                    assert!(matches!(result, Err(Ext4Error::Corrupt(_))));
+                }
+                assert!(
+                    *data.lock().unwrap() == before,
+                    "reparent changed a corrupt image"
+                );
+            }
+            fs.write_to_block(block_index, 0, &original).await.unwrap();
+        }
+    }
+
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn test_reparent_checks_htree_layout_without_checksums() {
+        let (fs, data) =
+            load_compressed_filesystem_rw("test_disk_ext3.bin.zst").await;
+        assert!(!fs.has_metadata_checksums());
+        let root = fs.read_root_inode().await.unwrap().index;
+        let inode = fs
+            .path_to_inode(
+                "/medium_dir".try_into().unwrap(),
+                FollowSymlinks::All,
+            )
+            .await
+            .unwrap();
+        let index =
+            crate::file_blocks::FileBlocks::from_inode(&inode, fs.clone())
+                .unwrap()
+                .get_block(0)
+                .await
+                .unwrap();
+        let mut original = vec![0; fs.superblock().block_size().to_usize()];
+        fs.read_from_block(index, 0, &mut original).await.unwrap();
+        let mut dir = Dir::open_inode(&fs, inode).unwrap();
+        for (offset, value) in [(0x1d, 9), (0x1f, 1), (0x20, 0), (0x22, 0)] {
+            let mut block = original.clone();
+            block[offset] = value;
+            fs.write_to_block(index, 0, &block).await.unwrap();
+            let before = data.lock().unwrap().clone();
+            let result = dir.reparent(root, root).await;
+            assert!(matches!(result, Err(Ext4Error::Corrupt(_))));
+            assert!(
+                *data.lock().unwrap() == before,
+                "reparent changed an invalid htree"
+            );
+        }
+    }
 
     #[test]
     fn test_choose_htree_split_with_hash_collision() {

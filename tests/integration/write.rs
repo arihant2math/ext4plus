@@ -14,7 +14,7 @@ use ext4plus::path::PathBuf;
 #[cfg(not(feature = "sync"))]
 use ext4plus::prelude::AsyncIterator;
 use ext4plus::prelude::{
-    Dir, DirEntryName, Ext4Error, File, FileType, FollowSymlinks, Inode,
+    Dir, DirEntryName, Ext4, Ext4Error, File, FileType, FollowSymlinks, Inode,
     InodeCreationOptions, InodeFlags, InodeMode, Path, truncate, write_at,
 };
 
@@ -270,6 +270,203 @@ async fn test_short_block_backed_symlink() {
         let remaining = root.unlink(name, inode).await.unwrap();
         assert!(remaining.is_none());
     }
+}
+
+#[maybe_async::maybe_async]
+async fn create_test_directory(fs: &Ext4, parent: &mut Dir, name: &str) -> Dir {
+    let inode = fs
+        .create_inode(InodeCreationOptions {
+            file_type: FileType::Directory,
+            mode: InodeMode::S_IFDIR | InodeMode::from_bits_retain(0o755),
+            uid: 0,
+            gid: 0,
+            time: Default::default(),
+            flags: InodeFlags::empty(),
+        })
+        .await
+        .unwrap();
+    let mut dir = Dir::init(fs.clone(), inode, parent.inode().index)
+        .await
+        .unwrap();
+    parent
+        .link(DirEntryName::try_from(name).unwrap(), dir.inode_mut())
+        .await
+        .unwrap();
+    dir
+}
+
+#[maybe_async::maybe_async]
+async fn check_directory_move(
+    fs: &Ext4,
+    old_parent: &mut Dir,
+    new_parent: &mut Dir,
+    name: &str,
+    block_size: usize,
+) {
+    let entry = DirEntryName::try_from(name).unwrap();
+    let inode = old_parent.get_entry(entry).await.unwrap();
+    let mut moved = Dir::open_inode(fs, inode).unwrap();
+    let entries_before = moved.read_dir().unwrap().collect::<Vec<_>>().await;
+    let bytes_before = fs.read_inode_file(moved.inode()).await.unwrap();
+    let flags_before = moved.inode().flags();
+    let blocks_before = moved.inode().blocks();
+
+    new_parent.link(entry, moved.inode_mut()).await.unwrap();
+    *moved.inode_mut() = old_parent
+        .unlink(entry, moved.inode().clone())
+        .await
+        .unwrap()
+        .unwrap();
+    // The raw reparent API deliberately leaves parent link counts to callers.
+    let old_links = old_parent.inode().links_count();
+    old_parent.inode_mut().set_links_count(old_links - 1);
+    old_parent.inode_mut().write(fs).await.unwrap();
+    let new_links = new_parent.inode().links_count();
+    let child_links = moved.inode().links_count();
+    moved
+        .reparent(old_parent.inode().index, new_parent.inode().index)
+        .await
+        .unwrap();
+    assert_eq!(new_parent.inode().links_count(), new_links);
+    assert_eq!(moved.inode().links_count(), child_links);
+    assert_eq!(moved.inode().flags(), flags_before);
+    assert_eq!(moved.inode().blocks(), blocks_before);
+
+    let reloaded = Inode::read(fs, moved.inode().index).await.unwrap();
+    let mut moved = Dir::open_inode(fs, reloaded).unwrap();
+    let observed_parent = moved
+        .get_entry(DirEntryName::try_from("..").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(observed_parent.index, new_parent.inode().index);
+    // Repeating a move to the current parent must also be harmless.
+    moved
+        .reparent(new_parent.inode().index, new_parent.inode().index)
+        .await
+        .unwrap();
+    let entries_after = moved.read_dir().unwrap().collect::<Vec<_>>().await;
+    assert_eq!(entries_before.len(), entries_after.len());
+    for (before, after) in entries_before.into_iter().zip(entries_after) {
+        let before = before.unwrap();
+        let after = after.unwrap();
+        assert_eq!(before.file_name(), after.file_name());
+        if after.file_name() != ".." {
+            assert_eq!(before.inode, after.inode);
+            // Exercise indexed lookups as well as directory iteration.
+            let looked_up = moved.get_entry(after.file_name()).await.unwrap();
+            assert_eq!(looked_up.index, after.inode);
+        }
+    }
+    // No index nodes or directory records other than ".." may be rebuilt.
+    let bytes_after = fs.read_inode_file(moved.inode()).await.unwrap();
+    // METADATA_CSUM in s_feature_ro_compat; the flag type is not exported.
+    let unchanged_end = if fs
+        .superblock()
+        .features()
+        .read_only_compatible()
+        .bits()
+        & 0x400
+        != 0
+    {
+        block_size.checked_sub(4).unwrap()
+    } else {
+        block_size
+    };
+    assert_eq!(&bytes_before[..12], &bytes_after[..12]);
+    assert_eq!(
+        &bytes_before[16..unchanged_end],
+        &bytes_after[16..unchanged_end]
+    );
+    assert_eq!(&bytes_before[block_size..], &bytes_after[block_size..]);
+}
+
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
+async fn test_reparent_preserves_linear_and_indexed_directories() {
+    for (fs, indexed) in [
+        (load_test_disk1_rw().await, true),
+        (load_ext2_rw().await, false),
+    ] {
+        let mut root =
+            Dir::open_inode(&fs, fs.read_root_inode().await.unwrap()).unwrap();
+        let mut parent =
+            create_test_directory(&fs, &mut root, "move_parent").await;
+        create_test_directory(&fs, &mut root, "move_child").await;
+        check_directory_move(&fs, &mut root, &mut parent, "move_child", 1024)
+            .await;
+        if indexed {
+            for name in ["medium_dir", "big_dir"] {
+                let inode = root
+                    .get_entry(DirEntryName::try_from(name).unwrap())
+                    .await
+                    .unwrap();
+                assert!(inode.flags().contains(InodeFlags::DIRECTORY_HTREE));
+                check_directory_move(&fs, &mut root, &mut parent, name, 1024)
+                    .await;
+            }
+        }
+        let image = fs.1.lock().unwrap().clone();
+        let reloaded_fs = Ext4::load(Box::new(image)).await.unwrap();
+        let parent_index = reloaded_fs
+            .path_to_inode(
+                Path::new("/move_parent/move_child/.."),
+                FollowSymlinks::All,
+            )
+            .await
+            .unwrap()
+            .index;
+        assert_eq!(parent_index, parent.inode().index);
+    }
+}
+
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
+async fn test_reparent_rejects_invalid_requests_without_writing() {
+    let fs = load_test_disk1_rw().await;
+    let old_parent = fs.read_root_inode().await.unwrap().index;
+    let inode = fs
+        .path_to_inode(Path::new("/medium_dir"), FollowSymlinks::All)
+        .await
+        .unwrap();
+    let file = fs
+        .path_to_inode(Path::new("/small_file"), FollowSymlinks::All)
+        .await
+        .unwrap();
+    let mut dir = Dir::open_inode(&fs, inode.clone()).unwrap();
+    let before = fs.1.lock().unwrap().clone();
+    let result = dir.reparent(dir.inode().index, old_parent).await;
+    assert!(matches!(result, Err(Ext4Error::Corrupt(_))));
+    let result = dir.reparent(old_parent, file.index).await;
+    assert!(matches!(result, Err(Ext4Error::NotADirectory)));
+    let invalid = core::num::NonZeroU32::new(u32::MAX).unwrap();
+    let result = dir.reparent(old_parent, invalid).await;
+    assert!(matches!(result, Err(Ext4Error::Corrupt(_))));
+    for (flag, encrypted) in [
+        (InodeFlags::DIRECTORY_ENCRYPTED, true),
+        (InodeFlags::IMMUTABLE, false),
+    ] {
+        dir.inode_mut().set_flags(inode.flags() | flag);
+        let error = dir.reparent(old_parent, inode.index).await.unwrap_err();
+        if encrypted {
+            assert!(matches!(error, Ext4Error::Encrypted));
+        } else {
+            assert!(matches!(error, Ext4Error::Readonly));
+        }
+    }
+    let readonly = Ext4::load(Box::new(before.clone())).await.unwrap();
+    let mut dir = Dir::open_inode(&readonly, inode).unwrap();
+    let result = dir.reparent(old_parent, dir.inode().index).await;
+    assert!(matches!(result, Err(Ext4Error::Readonly)));
+    let result = dir.reparent(old_parent, old_parent).await;
+    assert!(matches!(result, Err(Ext4Error::Readonly)));
+    assert!(
+        *fs.1.lock().unwrap() == before,
+        "invalid request changed the image"
+    );
 }
 
 #[maybe_async::test(

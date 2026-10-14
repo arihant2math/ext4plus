@@ -382,7 +382,6 @@ impl Ext4 {
 
     /// Read data from the exact on-disk block index without applying journal
     /// remapping.
-    #[cfg_attr(not(test), expect(dead_code))]
     #[maybe_async::maybe_async]
     pub(crate) async fn read_from_block_raw(
         &self,
@@ -2035,6 +2034,7 @@ mod tests {
         offset: Option<u64>,
         prefix: Vec<u8>,
         after_write: bool,
+        partial_len: Option<usize>,
         rejected: core::sync::atomic::AtomicBool,
     }
 
@@ -2054,7 +2054,11 @@ mod tests {
                     .swap(true, core::sync::atomic::Ordering::SeqCst)
             {
                 if self.after_write {
-                    self.inner.write(start_byte, bytes).await?;
+                    let count = self
+                        .partial_len
+                        .unwrap_or(bytes.len())
+                        .min(bytes.len());
+                    self.inner.write(start_byte, &bytes[..count]).await?;
                 }
                 return Err(Box::new(std::io::Error::other(
                     "injected write failure",
@@ -2102,6 +2106,7 @@ mod tests {
                     _ => Vec::new(),
                 },
                 after_write: published,
+                partial_len: None,
                 rejected: core::sync::atomic::AtomicBool::new(false),
             };
             PtrPrimitive::get_mut(&mut fs.0).unwrap().writer =
@@ -2164,6 +2169,68 @@ mod tests {
                 assert_eq!(fs.superblock().free_blocks_count(), free_blocks);
             }
             test_util::fsck_ext4_arc_image(&storage);
+        }
+    }
+
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn test_reparent_write_failure_preserves_parent_block() {
+        for (source, destination) in
+            [("/dir1", "/medium_dir"), ("/medium_dir", "/dir1")]
+        {
+            for partial_len in [None, Some(24usize), Some(1024)] {
+                let (mut fs, storage) =
+                    load_compressed_filesystem_rw("test_disk1.bin.zst").await;
+                let old_parent = fs.read_root_inode().await.unwrap().index;
+                let inode = fs
+                    .path_to_inode(
+                        source.try_into().unwrap(),
+                        FollowSymlinks::All,
+                    )
+                    .await
+                    .unwrap();
+                let new_parent = fs
+                    .path_to_inode(
+                        destination.try_into().unwrap(),
+                        FollowSymlinks::All,
+                    )
+                    .await
+                    .unwrap()
+                    .index;
+                let block_index = FileBlocks::from_inode(&inode, fs.clone())
+                    .unwrap()
+                    .get_block(0)
+                    .await
+                    .unwrap();
+                let position = block_index
+                    .checked_mul(fs.superblock().block_size().to_u64())
+                    .unwrap();
+                PtrPrimitive::get_mut(&mut fs.0).unwrap().writer =
+                    Some(Box::new(RejectOneWrite {
+                        inner: MemRw(storage.clone()),
+                        offset: Some(position),
+                        prefix: Vec::new(),
+                        after_write: partial_len.is_some(),
+                        partial_len,
+                        rejected: core::sync::atomic::AtomicBool::new(false),
+                    }));
+                let mut dir = Dir::open_inode(&fs, inode).unwrap();
+                let before = storage.lock().unwrap().clone();
+                let result = dir.reparent(old_parent, new_parent).await;
+                assert!(matches!(result, Err(Ext4Error::Io(_))));
+                assert!(
+                    *storage.lock().unwrap() == before,
+                    "failed reparent changed a directory block"
+                );
+                let parent = dir
+                    .get_entry(DirEntryName::try_from("..").unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(parent.index, old_parent);
+                test_util::fsck_ext4_arc_image(&storage);
+            }
         }
     }
 
