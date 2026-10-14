@@ -630,6 +630,10 @@ pub struct Dir {
 }
 
 impl Dir {
+    pub(crate) fn belongs_to(&self, fs: &Ext4) -> bool {
+        PtrPrimitive::ptr_eq(&self.fs.0, &fs.0)
+    }
+
     /// Create and initialize a new directory.
     #[maybe_async::maybe_async]
     pub async fn init(

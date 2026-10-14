@@ -183,6 +183,7 @@ pub struct Inode {
 
 impl Inode {
     const INLINE_DATA_LEN: usize = 60;
+    pub(crate) const MAX_INLINE_SYMLINK_LEN: usize = Self::INLINE_DATA_LEN - 1;
     const L_I_CHECKSUM_LO_OFFSET: usize = 0x74 + 0x8;
     const I_CHECKSUM_HI_OFFSET: usize = 0x82;
 
@@ -300,7 +301,12 @@ impl Inode {
         let blocks = FileBlocks::initialize(&inode, ext4.clone())?;
         let inline_data = blocks.to_bytes()?;
         inode.set_inline_data(inline_data);
-        inode.write(ext4).await?;
+        if let Err(error) = inode.write(ext4).await {
+            // Reclaim the allocated inode if its first initialization write fails.
+            inode.zero(ext4).await?;
+            ext4.free_inode(inode).await?;
+            return Err(error);
+        }
         Ok(inode)
     }
 
@@ -429,18 +435,19 @@ impl Inode {
             return Err(Ext4Error::NotASymlink);
         }
 
-        // An empty symlink target is not allowed.
-        if self.size_in_bytes() == 0 {
+        // Targets must fit, including their terminating NUL, in one block.
+        if self.size_in_bytes() == 0
+            || self.size_in_bytes() >= ext4.0.superblock.block_size().to_u64()
+        {
             return Err(CorruptKind::SymlinkTarget(self.index).into());
         }
 
-        // Symlink targets of up to 59 bytes are stored inline. Longer
-        // targets are stored as regular file data.
-        const MAX_INLINE_SYMLINK_LEN: u64 = 59;
-
-        if self.size_in_bytes() <= MAX_INLINE_SYMLINK_LEN {
-            // OK to unwrap since we checked the size above.
-            let len = usize::try_from(self.size_in_bytes()).unwrap();
+        if self.is_fast_symlink(ext4) {
+            let len = usize::try_from(self.size_in_bytes())
+                .map_err(|_| CorruptKind::SymlinkTarget(self.index))?;
+            if len > Self::MAX_INLINE_SYMLINK_LEN {
+                return Err(CorruptKind::SymlinkTarget(self.index).into());
+            }
             let target = &self.inline_data()[..len];
 
             PathBuf::try_from(target)
@@ -450,6 +457,23 @@ impl Inode {
             PathBuf::try_from(data)
                 .map_err(|_| CorruptKind::SymlinkTarget(self.index).into())
         }
+    }
+
+    /// A fast symlink stores its target in i_block, with no data blocks.
+    /// An external xattr block, if present, still contributes to i_blocks.
+    pub(crate) fn is_fast_symlink(&self, ext4: &Ext4) -> bool {
+        let xattr_blocks = if self.file_acl() == 0 {
+            0
+        } else if self.flags().contains(InodeFlags::HUGE_FILE) {
+            1
+        } else {
+            ext4.0.superblock.block_size().to_u64() / 512
+        };
+        self.file_type.is_symlink()
+            && !self
+                .flags()
+                .intersects(InodeFlags::EXTENTS | InodeFlags::INLINE_DATA)
+            && self.blocks() == xattr_blocks
     }
 
     /// Get the size of the inode
@@ -586,8 +610,8 @@ impl Inode {
     #[must_use]
     pub fn blocks(&self) -> u64 {
         let i_blocks_lo = read_u32le(&self.inode_data, 0x1c);
-        let i_blocks_high = read_u32le(&self.inode_data, 0x74);
-        u64_from_hilo(i_blocks_high, i_blocks_lo)
+        let i_blocks_high = read_u16le(&self.inode_data, 0x74);
+        u64_from_hilo(u32::from(i_blocks_high), i_blocks_lo)
     }
 
     /// Set the number of blocks allocated to the inode.
@@ -868,4 +892,37 @@ fn get_inode_location(
             .map_err(|_| err())?;
 
     Ok((block_index, offset_within_block))
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+    use crate::FollowSymlinks;
+    use crate::test_util::load_test_disk1;
+
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn test_fast_symlink_with_high_xattr_address() {
+        let fs = load_test_disk1().await;
+        let mut inode = fs
+            .path_to_inode(
+                "/sym_simple".try_into().unwrap(),
+                FollowSymlinks::ExcludeFinalComponent,
+            )
+            .await
+            .unwrap();
+        let expected = inode.symlink_target(&fs).await.unwrap();
+        // Only mutate the in-memory inode: no huge filesystem is needed to
+        // exercise the adjacent high halves of i_blocks and i_file_acl.
+        let xattr_block = 0x2345_0000_0100;
+        inode.set_file_acl(xattr_block);
+        write_u16le(&mut inode.inode_data, 0x74, 0);
+        write_u32le(&mut inode.inode_data, 0x1c, 2);
+        assert_eq!(inode.blocks(), 2);
+        let actual = inode.symlink_target(&fs).await.unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(inode.file_acl(), xattr_block);
+    }
 }
