@@ -14,7 +14,7 @@ use ext4plus::path::PathBuf;
 #[cfg(not(feature = "sync"))]
 use ext4plus::prelude::AsyncIterator;
 use ext4plus::prelude::{
-    Dir, DirEntryName, Ext4Error, File, FileType, FollowSymlinks, Inode,
+    Dir, DirEntryName, Ext4, Ext4Error, File, FileType, FollowSymlinks, Inode,
     InodeCreationOptions, InodeFlags, InodeMode, Path, truncate, write_at,
 };
 
@@ -23,6 +23,450 @@ pub async fn load_ext2_rw() -> Ext4Wrapper {
     let (fs, data) =
         load_compressed_filesystem_rw("test_disk_ext2.bin.zst").await;
     Ext4Wrapper(fs, data)
+}
+
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
+async fn test_symlink_creation_boundaries() {
+    for fs in [load_test_disk1_rw().await, load_ext2_rw().await] {
+        let mut root =
+            Dir::open_inode(&fs, fs.read_root_inode().await.unwrap()).unwrap();
+        for len in [1usize, 13, 59, 60, 61, 120, 1023] {
+            let name = format!("new_symlink_{len}");
+            let mut target = "t/".repeat(len.div_ceil(2));
+            target.truncate(len);
+            let inode = fs
+                .symlink(
+                    &mut root,
+                    DirEntryName::try_from(name.as_str()).unwrap(),
+                    PathBuf::try_from(target.as_str()).unwrap(),
+                    0,
+                    0,
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+            let reloaded = Inode::read(&fs, inode.index).await.unwrap();
+            assert_eq!(reloaded.mode().bits(), 0o120777);
+            let observed_target = reloaded.symlink_target(&fs).await.unwrap();
+            assert_eq!(observed_target.as_ref(), target.as_bytes());
+            assert_eq!(reloaded.fs_blocks(&fs).unwrap() == 0, len < 60);
+        }
+    }
+}
+
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
+async fn test_symlink_unlink_preserves_hard_links() {
+    for fs in [load_test_disk1_rw().await, load_ext2_rw().await] {
+        let mut root =
+            Dir::open_inode(&fs, fs.read_root_inode().await.unwrap()).unwrap();
+        let name = DirEntryName::try_from("new_symlink").unwrap();
+        let alias = DirEntryName::try_from("symlink_hard_link").unwrap();
+        for len in [1usize, 13, 59, 60, 61, 120, 1023] {
+            let mut target = "t/".repeat(len.div_ceil(2));
+            target.truncate(len);
+            let mut inode = fs
+                .symlink(
+                    &mut root,
+                    name,
+                    PathBuf::try_from(target.as_str()).unwrap(),
+                    0,
+                    0,
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+            root.link(alias, &mut inode).await.unwrap();
+            let mut remaining =
+                root.unlink(name, inode).await.unwrap().unwrap();
+            assert_eq!(remaining.links_count(), 1);
+            let removed = root.get_entry(name).await;
+            assert!(matches!(removed, Err(Ext4Error::NotFound)));
+            let reloaded = root.get_entry(alias).await.unwrap();
+            assert_eq!(reloaded.index, remaining.index);
+            let observed_target = reloaded.symlink_target(&fs).await.unwrap();
+            assert_eq!(observed_target.as_ref(), target.as_bytes());
+            // The raw unlink API leaves deletion timestamps to its caller.
+            remaining.set_dtime(core::time::Duration::from_secs(5000));
+            let remaining = root.unlink(alias, remaining).await.unwrap();
+            assert!(remaining.is_none());
+            let removed = root.get_entry(alias).await;
+            assert!(matches!(removed, Err(Ext4Error::NotFound)));
+            let contents = fs.read("/small_file").await.unwrap();
+            assert_eq!(contents, b"hello, world!");
+        }
+    }
+}
+
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
+async fn test_symlink_empty_target_does_not_allocate() {
+    let fs = load_test_disk1_rw().await;
+    let mut root =
+        Dir::open_inode(&fs, fs.read_root_inode().await.unwrap()).unwrap();
+    let before = fs.1.lock().unwrap().clone();
+    let result = fs
+        .symlink(
+            &mut root,
+            DirEntryName::try_from("empty_symlink").unwrap(),
+            PathBuf::empty(),
+            0,
+            0,
+            Default::default(),
+        )
+        .await;
+    assert!(matches!(result, Err(Ext4Error::MalformedPath)));
+    assert!(
+        *fs.1.lock().unwrap() == before,
+        "empty target changed the image"
+    );
+}
+
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
+async fn test_symlink_existing_name_does_not_allocate() {
+    let fs = load_test_disk1_rw().await;
+    let mut root =
+        Dir::open_inode(&fs, fs.read_root_inode().await.unwrap()).unwrap();
+    for name in ["small_file", "dir1", "sym_simple", ".", ".."] {
+        let before = fs.1.lock().unwrap().clone();
+        let result = fs
+            .symlink(
+                &mut root,
+                DirEntryName::try_from(name).unwrap(),
+                PathBuf::try_from("target").unwrap(),
+                0,
+                0,
+                Default::default(),
+            )
+            .await;
+        assert!(matches!(result, Err(Ext4Error::AlreadyExists)));
+        assert!(
+            *fs.1.lock().unwrap() == before,
+            "existing name {name} changed the image"
+        );
+    }
+}
+
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
+async fn test_symlink_block_size_limit_does_not_allocate() {
+    for fs in [load_test_disk1_rw().await, load_ext2_rw().await] {
+        let mut root =
+            Dir::open_inode(&fs, fs.read_root_inode().await.unwrap()).unwrap();
+        let before = fs.1.lock().unwrap().clone();
+        for len in [1024usize, 1025, 2049] {
+            let mut target = "t/".repeat(len.div_ceil(2));
+            target.truncate(len);
+            let result = fs
+                .symlink(
+                    &mut root,
+                    DirEntryName::try_from("too_long_symlink").unwrap(),
+                    PathBuf::try_from(target.as_str()).unwrap(),
+                    0,
+                    0,
+                    Default::default(),
+                )
+                .await;
+            assert!(matches!(result, Err(Ext4Error::PathTooLong)));
+            assert!(
+                *fs.1.lock().unwrap() == before,
+                "oversized target changed the image"
+            );
+        }
+    }
+}
+
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
+async fn test_symlink_rejects_foreign_and_immutable_parent() {
+    let fs = load_test_disk1_rw().await;
+    let other = load_ext2_rw().await;
+    let before = fs.1.lock().unwrap().clone();
+    let other_before = other.1.lock().unwrap().clone();
+    let mut foreign =
+        Dir::open_inode(&other, other.read_root_inode().await.unwrap())
+            .unwrap();
+    let result = fs
+        .symlink(
+            &mut foreign,
+            DirEntryName::try_from("foreign_symlink").unwrap(),
+            PathBuf::try_from("target").unwrap(),
+            0,
+            0,
+            Default::default(),
+        )
+        .await;
+    assert!(matches!(result, Err(Ext4Error::CrossDevice)));
+    assert!(
+        *other.1.lock().unwrap() == other_before,
+        "foreign parent changed the image"
+    );
+    let mut root =
+        Dir::open_inode(&fs, fs.read_root_inode().await.unwrap()).unwrap();
+    let flags = root.inode().flags();
+    root.inode_mut().set_flags(flags | InodeFlags::IMMUTABLE);
+    let result = fs
+        .symlink(
+            &mut root,
+            DirEntryName::try_from("immutable_symlink").unwrap(),
+            PathBuf::try_from("target").unwrap(),
+            0,
+            0,
+            Default::default(),
+        )
+        .await;
+    assert!(matches!(result, Err(Ext4Error::Readonly)));
+    assert!(
+        *fs.1.lock().unwrap() == before,
+        "invalid parent changed the image"
+    );
+}
+
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
+async fn test_short_block_backed_symlink() {
+    for fs in [load_test_disk1_rw().await, load_ext2_rw().await] {
+        let mut inode = fs
+            .create_inode(InodeCreationOptions {
+                file_type: FileType::Regular,
+                mode: InodeMode::S_IFREG | InodeMode::from_bits_retain(0o777),
+                uid: 0,
+                gid: 0,
+                time: Default::default(),
+                flags: InodeFlags::empty(),
+            })
+            .await
+            .unwrap();
+        let target = b"short_target";
+        let written = write_at(&fs, &mut inode, target, 0).await.unwrap();
+        assert_eq!(written, target.len());
+        inode
+            .set_mode(InodeMode::S_IFLNK | InodeMode::from_bits_retain(0o777))
+            .unwrap();
+        let mut root =
+            Dir::open_inode(&fs, fs.read_root_inode().await.unwrap()).unwrap();
+        let name = DirEntryName::try_from("block_backed_symlink").unwrap();
+        root.link(name, &mut inode).await.unwrap();
+        let mut inode = root.get_entry(name).await.unwrap();
+        let observed_target = inode.symlink_target(&fs).await.unwrap();
+        assert_eq!(observed_target.as_ref(), target);
+        inode.set_dtime(core::time::Duration::from_secs(5000));
+        let remaining = root.unlink(name, inode).await.unwrap();
+        assert!(remaining.is_none());
+    }
+}
+
+#[maybe_async::maybe_async]
+async fn create_test_directory(fs: &Ext4, parent: &mut Dir, name: &str) -> Dir {
+    let inode = fs
+        .create_inode(InodeCreationOptions {
+            file_type: FileType::Directory,
+            mode: InodeMode::S_IFDIR | InodeMode::from_bits_retain(0o755),
+            uid: 0,
+            gid: 0,
+            time: Default::default(),
+            flags: InodeFlags::empty(),
+        })
+        .await
+        .unwrap();
+    let mut dir = Dir::init(fs.clone(), inode, parent.inode().index)
+        .await
+        .unwrap();
+    parent
+        .link(DirEntryName::try_from(name).unwrap(), dir.inode_mut())
+        .await
+        .unwrap();
+    dir
+}
+
+#[maybe_async::maybe_async]
+async fn check_directory_move(
+    fs: &Ext4,
+    old_parent: &mut Dir,
+    new_parent: &mut Dir,
+    name: &str,
+    block_size: usize,
+) {
+    let entry = DirEntryName::try_from(name).unwrap();
+    let inode = old_parent.get_entry(entry).await.unwrap();
+    let mut moved = Dir::open_inode(fs, inode).unwrap();
+    let entries_before = moved.read_dir().unwrap().collect::<Vec<_>>().await;
+    let bytes_before = fs.read_inode_file(moved.inode()).await.unwrap();
+    let flags_before = moved.inode().flags();
+    let blocks_before = moved.inode().blocks();
+
+    new_parent.link(entry, moved.inode_mut()).await.unwrap();
+    *moved.inode_mut() = old_parent
+        .unlink(entry, moved.inode().clone())
+        .await
+        .unwrap()
+        .unwrap();
+    // The raw reparent API deliberately leaves parent link counts to callers.
+    let old_links = old_parent.inode().links_count();
+    old_parent.inode_mut().set_links_count(old_links - 1);
+    old_parent.inode_mut().write(fs).await.unwrap();
+    let new_links = new_parent.inode().links_count();
+    let child_links = moved.inode().links_count();
+    moved
+        .reparent(old_parent.inode().index, new_parent.inode().index)
+        .await
+        .unwrap();
+    assert_eq!(new_parent.inode().links_count(), new_links);
+    assert_eq!(moved.inode().links_count(), child_links);
+    assert_eq!(moved.inode().flags(), flags_before);
+    assert_eq!(moved.inode().blocks(), blocks_before);
+
+    let reloaded = Inode::read(fs, moved.inode().index).await.unwrap();
+    let mut moved = Dir::open_inode(fs, reloaded).unwrap();
+    let observed_parent = moved
+        .get_entry(DirEntryName::try_from("..").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(observed_parent.index, new_parent.inode().index);
+    // Repeating a move to the current parent must also be harmless.
+    moved
+        .reparent(new_parent.inode().index, new_parent.inode().index)
+        .await
+        .unwrap();
+    let entries_after = moved.read_dir().unwrap().collect::<Vec<_>>().await;
+    assert_eq!(entries_before.len(), entries_after.len());
+    for (before, after) in entries_before.into_iter().zip(entries_after) {
+        let before = before.unwrap();
+        let after = after.unwrap();
+        assert_eq!(before.file_name(), after.file_name());
+        if after.file_name() != ".." {
+            assert_eq!(before.inode, after.inode);
+            // Exercise indexed lookups as well as directory iteration.
+            let looked_up = moved.get_entry(after.file_name()).await.unwrap();
+            assert_eq!(looked_up.index, after.inode);
+        }
+    }
+    // No index nodes or directory records other than ".." may be rebuilt.
+    let bytes_after = fs.read_inode_file(moved.inode()).await.unwrap();
+    // METADATA_CSUM in s_feature_ro_compat; the flag type is not exported.
+    let unchanged_end = if fs
+        .superblock()
+        .features()
+        .read_only_compatible()
+        .bits()
+        & 0x400
+        != 0
+    {
+        block_size.checked_sub(4).unwrap()
+    } else {
+        block_size
+    };
+    assert_eq!(&bytes_before[..12], &bytes_after[..12]);
+    assert_eq!(
+        &bytes_before[16..unchanged_end],
+        &bytes_after[16..unchanged_end]
+    );
+    assert_eq!(&bytes_before[block_size..], &bytes_after[block_size..]);
+}
+
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
+async fn test_reparent_preserves_linear_and_indexed_directories() {
+    for (fs, indexed) in [
+        (load_test_disk1_rw().await, true),
+        (load_ext2_rw().await, false),
+    ] {
+        let mut root =
+            Dir::open_inode(&fs, fs.read_root_inode().await.unwrap()).unwrap();
+        let mut parent =
+            create_test_directory(&fs, &mut root, "move_parent").await;
+        create_test_directory(&fs, &mut root, "move_child").await;
+        check_directory_move(&fs, &mut root, &mut parent, "move_child", 1024)
+            .await;
+        if indexed {
+            for name in ["medium_dir", "big_dir"] {
+                let inode = root
+                    .get_entry(DirEntryName::try_from(name).unwrap())
+                    .await
+                    .unwrap();
+                assert!(inode.flags().contains(InodeFlags::DIRECTORY_HTREE));
+                check_directory_move(&fs, &mut root, &mut parent, name, 1024)
+                    .await;
+            }
+        }
+        let image = fs.1.lock().unwrap().clone();
+        let reloaded_fs = Ext4::load(Box::new(image)).await.unwrap();
+        let parent_index = reloaded_fs
+            .path_to_inode(
+                Path::new("/move_parent/move_child/.."),
+                FollowSymlinks::All,
+            )
+            .await
+            .unwrap()
+            .index;
+        assert_eq!(parent_index, parent.inode().index);
+    }
+}
+
+#[maybe_async::test(
+    feature = "sync",
+    async(not(feature = "sync"), tokio::test)
+)]
+async fn test_reparent_rejects_invalid_requests_without_writing() {
+    let fs = load_test_disk1_rw().await;
+    let old_parent = fs.read_root_inode().await.unwrap().index;
+    let inode = fs
+        .path_to_inode(Path::new("/medium_dir"), FollowSymlinks::All)
+        .await
+        .unwrap();
+    let file = fs
+        .path_to_inode(Path::new("/small_file"), FollowSymlinks::All)
+        .await
+        .unwrap();
+    let mut dir = Dir::open_inode(&fs, inode.clone()).unwrap();
+    let before = fs.1.lock().unwrap().clone();
+    let result = dir.reparent(dir.inode().index, old_parent).await;
+    assert!(matches!(result, Err(Ext4Error::Corrupt(_))));
+    let result = dir.reparent(old_parent, file.index).await;
+    assert!(matches!(result, Err(Ext4Error::NotADirectory)));
+    let invalid = core::num::NonZeroU32::new(u32::MAX).unwrap();
+    let result = dir.reparent(old_parent, invalid).await;
+    assert!(matches!(result, Err(Ext4Error::Corrupt(_))));
+    for (flag, encrypted) in [
+        (InodeFlags::DIRECTORY_ENCRYPTED, true),
+        (InodeFlags::IMMUTABLE, false),
+    ] {
+        dir.inode_mut().set_flags(inode.flags() | flag);
+        let error = dir.reparent(old_parent, inode.index).await.unwrap_err();
+        if encrypted {
+            assert!(matches!(error, Ext4Error::Encrypted));
+        } else {
+            assert!(matches!(error, Ext4Error::Readonly));
+        }
+    }
+    let readonly = Ext4::load(Box::new(before.clone())).await.unwrap();
+    let mut dir = Dir::open_inode(&readonly, inode).unwrap();
+    let result = dir.reparent(old_parent, dir.inode().index).await;
+    assert!(matches!(result, Err(Ext4Error::Readonly)));
+    let result = dir.reparent(old_parent, old_parent).await;
+    assert!(matches!(result, Err(Ext4Error::Readonly)));
+    assert!(
+        *fs.1.lock().unwrap() == before,
+        "invalid request changed the image"
+    );
 }
 
 #[maybe_async::test(

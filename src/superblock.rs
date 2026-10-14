@@ -343,6 +343,10 @@ impl Superblock {
         self.inode_size
     }
 
+    pub(crate) fn inodes_count(&self) -> u32 {
+        read_u32le(&self.data, 0)
+    }
+
     /// Number of inodes in a block group, some could be unused.
     pub fn inodes_per_block_group(&self) -> NonZeroU32 {
         self.inodes_per_block_group

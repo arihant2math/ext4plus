@@ -164,7 +164,7 @@ use core::time::Duration;
 use dir::Dir;
 use error::{CorruptKind, Ext4Error};
 use features::ReadOnlyCompatibleFeatures;
-use file::{File, write_at};
+use file::File;
 use file_blocks::FileBlocks;
 use inode::{
     Inode, InodeCreationOptions, InodeFlags, InodeIndex, InodeMode,
@@ -382,7 +382,6 @@ impl Ext4 {
 
     /// Read data from the exact on-disk block index without applying journal
     /// remapping.
-    #[cfg_attr(not(test), expect(dead_code))]
     #[maybe_async::maybe_async]
     pub(crate) async fn read_from_block_raw(
         &self,
@@ -1482,8 +1481,11 @@ impl Ext4 {
         &self,
         mut inode: Inode,
     ) -> Result<(), Ext4Error> {
-        let blocks = FileBlocks::from_inode(&inode, self.clone())?;
-        blocks.free_all().await?;
+        // A fast symlink stores target bytes in i_block, not block numbers.
+        if !inode.is_fast_symlink(self) {
+            let blocks = FileBlocks::from_inode(&inode, self.clone())?;
+            blocks.free_all().await?;
+        }
         inode.set_size_in_bytes(0);
         inode.set_links_count(0);
         inode.write(self).await?;
@@ -1547,6 +1549,14 @@ impl Ext4 {
     /// # Errors
     /// See [`Dir::link`] for linking errors. Read-only filesystem cannot be written to.
     /// If an inode cannot be allocated an error is returned as well.
+    /// Empty targets return [`Ext4Error::MalformedPath`] without allocating an inode.
+    /// Targets must leave room for a terminating NUL in one filesystem block;
+    /// longer targets return [`Ext4Error::PathTooLong`] before allocation.
+    /// Existing names return [`Ext4Error::AlreadyExists`] before allocation.
+    /// A parent from another filesystem returns [`Ext4Error::CrossDevice`].
+    /// The caller must serialize changes to the parent directory.
+    /// A storage error during directory insertion can occur after the name
+    /// has been published; in that case the entry and its inode are retained.
     #[maybe_async::maybe_async]
     pub async fn symlink(
         &self,
@@ -1557,31 +1567,79 @@ impl Ext4 {
         gid: u32,
         time: Duration,
     ) -> Result<Inode, Ext4Error> {
+        #[maybe_async::maybe_async]
+        async fn write_target(
+            fs: &Ext4,
+            inode: &mut Inode,
+            target: &[u8],
+        ) -> Result<(), Ext4Error> {
+            if target.len() <= Inode::MAX_INLINE_SYMLINK_LEN {
+                let mut bytes = [0; 60];
+                bytes[..target.len()].copy_from_slice(target);
+                inode.set_inline_data(bytes);
+                inode.set_size_in_bytes(u64_from_usize(target.len()));
+                inode.set_flags(inode.flags().difference(InodeFlags::EXTENTS));
+                inode.write(fs).await
+            } else {
+                let mut blocks = FileBlocks::from_inode(inode, fs.clone())?;
+                let result = blocks.write_at(inode, target, 0).await;
+                // Preserve mappings allocated before a failed data write so
+                // the caller can reclaim the unpublished inode's blocks.
+                inode.set_inline_data(blocks.to_bytes()?);
+                match result {
+                    Ok(count) if count == target.len() => Ok(()),
+                    Ok(_) => Err(Ext4Error::NoSpace),
+                    Err(error) => Err(error),
+                }
+            }
+        }
+
+        if !parent_dir.belongs_to(self) {
+            return Err(Ext4Error::CrossDevice);
+        }
+        if parent_dir.inode().flags().contains(InodeFlags::IMMUTABLE) {
+            return Err(Ext4Error::Readonly);
+        }
+        if target.as_ref().is_empty() {
+            return Err(Ext4Error::MalformedPath);
+        }
+        if target.as_ref().len() >= self.0.superblock.block_size().to_usize() {
+            return Err(Ext4Error::PathTooLong);
+        }
+        match parent_dir.get_entry(name).await {
+            Ok(_) => return Err(Ext4Error::AlreadyExists),
+            Err(Ext4Error::NotFound) => (),
+            Err(error) => return Err(error),
+        }
         let mut inode = self
             .create_inode(InodeCreationOptions {
                 file_type: FileType::Symlink,
-                mode: InodeMode::S_IFLNK,
+                mode: InodeMode::S_IFLNK | InodeMode::from_bits_retain(0o777),
                 uid,
                 gid,
                 time,
                 flags: InodeFlags::empty(),
             })
             .await?;
-        if target.as_ref().len() <= 60 {
-            // Fast symlink: store the target in the inode itself.
-            let mut target_bytes = [0; 60];
-            target_bytes[..target.as_ref().len()]
-                .copy_from_slice(target.as_ref());
-            inode.set_inline_data(target_bytes);
-            inode.set_size_in_bytes(u64_from_usize(target.as_ref().len()));
-            inode.set_flags(inode.flags().difference(InodeFlags::EXTENTS));
-            inode.write(self).await?;
-        } else {
-            // Slow symlink: store the target in a data block.
-            let target_bytes = target.as_ref();
-            write_at(self, &mut inode, target_bytes, 0).await?;
+        if let Err(error) =
+            write_target(self, &mut inode, target.as_ref()).await
+        {
+            self.delete_file(inode).await?;
+            return Err(error);
         }
-        parent_dir.link(name, &mut inode).await?;
+        if let Err(error) = parent_dir.link(name, &mut inode).await {
+            // An insertion can fail after publishing its entry. Only reclaim
+            // the inode when a lookup confirms that no name points to it.
+            let unpublished = match parent_dir.get_entry(name).await {
+                Err(Ext4Error::NotFound) => true,
+                Ok(existing) => existing.index != inode.index,
+                Err(_) => false,
+            };
+            if unpublished {
+                self.delete_file(inode).await?;
+            }
+            return Err(error);
+        }
         Ok(inode)
     }
 
@@ -1970,6 +2028,211 @@ mod tests {
         MemRw, load_compressed_filesystem_rw, load_test_disk1_rw_no_fsck,
     };
     use test_util::load_test_disk1;
+
+    struct RejectOneWrite {
+        inner: MemRw,
+        offset: Option<u64>,
+        prefix: Vec<u8>,
+        after_write: bool,
+        partial_len: Option<usize>,
+        rejected: core::sync::atomic::AtomicBool,
+    }
+
+    #[cfg_attr(feature = "multi-threaded", maybe_async::maybe_async)]
+    #[cfg_attr(not(feature = "multi-threaded"), maybe_async::maybe_async(?Send))]
+    impl Ext4Write for RejectOneWrite {
+        async fn write(
+            &self,
+            start_byte: u64,
+            bytes: &[u8],
+        ) -> Result<(), crate::error::BoxedError> {
+            let matches = self.offset == Some(start_byte)
+                || (!self.prefix.is_empty() && bytes.starts_with(&self.prefix));
+            if matches
+                && !self
+                    .rejected
+                    .swap(true, core::sync::atomic::Ordering::SeqCst)
+            {
+                if self.after_write {
+                    let count = self
+                        .partial_len
+                        .unwrap_or(bytes.len())
+                        .min(bytes.len());
+                    self.inner.write(start_byte, &bytes[..count]).await?;
+                }
+                return Err(Box::new(std::io::Error::other(
+                    "injected write failure",
+                )));
+            }
+            self.inner.write(start_byte, bytes).await
+        }
+    }
+
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn test_symlink_write_failures_preserve_namespace() {
+        for failure in [
+            "inode",
+            "data",
+            "entry",
+            "published_inline",
+            "published_block",
+        ] {
+            let published =
+                matches!(failure, "published_inline" | "published_block");
+            let (mut fs, storage) =
+                load_compressed_filesystem_rw("test_disk1.bin.zst").await;
+            let root_inode = fs.read_root_inode().await.unwrap();
+            let root_block = FileBlocks::from_inode(&root_inode, fs.clone())
+                .unwrap()
+                .get_block(0)
+                .await
+                .unwrap();
+            let offset = root_block
+                .checked_mul(fs.superblock().block_size().to_u64())
+                .unwrap();
+            let writer = RejectOneWrite {
+                inner: MemRw(storage.clone()),
+                offset: if failure == "entry" || published {
+                    Some(offset)
+                } else {
+                    None
+                },
+                prefix: match failure {
+                    "inode" => vec![0xff, 0xa1, 0, 0],
+                    "data" => b"z/z/".to_vec(),
+                    _ => Vec::new(),
+                },
+                after_write: published,
+                partial_len: None,
+                rejected: core::sync::atomic::AtomicBool::new(false),
+            };
+            PtrPrimitive::get_mut(&mut fs.0).unwrap().writer =
+                Some(Box::new(writer));
+            let mut root = Dir::open_inode(&fs, root_inode).unwrap();
+            let free_inodes = fs.superblock().free_inodes_count();
+            let free_blocks = fs.superblock().free_blocks_count();
+            let name = DirEntryName::try_from("failed_symlink").unwrap();
+            let target = if matches!(failure, "data" | "published_block") {
+                "z/".repeat(80)
+            } else {
+                "short_target".into()
+            };
+            let result = fs
+                .symlink(
+                    &mut root,
+                    name,
+                    PathBuf::try_from(target.as_str()).unwrap(),
+                    0,
+                    0,
+                    Duration::ZERO,
+                )
+                .await;
+            assert!(matches!(result, Err(Ext4Error::Io(_))));
+            let entry = root.get_entry(name).await;
+            if published {
+                let entry = entry.unwrap();
+                assert_eq!(entry.links_count(), 1);
+                let observed = entry.symlink_target(&fs).await.unwrap();
+                assert_eq!(observed.as_ref(), target.as_bytes());
+                assert_eq!(
+                    fs.superblock().free_inodes_count(),
+                    free_inodes.checked_sub(1).unwrap()
+                );
+                let expected_blocks = if failure == "published_block" {
+                    free_blocks.checked_sub(1).unwrap()
+                } else {
+                    free_blocks
+                };
+                assert_eq!(
+                    fs.superblock().free_blocks_count(),
+                    expected_blocks
+                );
+                // Verify the retained name also survives a fresh mount.
+                let reloaded_fs =
+                    Ext4::load(Box::new(MemRw(storage.clone()))).await.unwrap();
+                let reloaded_inode = reloaded_fs
+                    .path_to_inode(
+                        "/failed_symlink".try_into().unwrap(),
+                        FollowSymlinks::ExcludeFinalComponent,
+                    )
+                    .await
+                    .unwrap();
+                let observed =
+                    reloaded_inode.symlink_target(&reloaded_fs).await.unwrap();
+                assert_eq!(observed.as_ref(), target.as_bytes());
+            } else {
+                assert!(matches!(entry, Err(Ext4Error::NotFound)));
+                assert_eq!(fs.superblock().free_inodes_count(), free_inodes);
+                assert_eq!(fs.superblock().free_blocks_count(), free_blocks);
+            }
+            test_util::fsck_ext4_arc_image(&storage);
+        }
+    }
+
+    #[maybe_async::test(
+        feature = "sync",
+        async(not(feature = "sync"), tokio::test)
+    )]
+    async fn test_reparent_write_failure_preserves_parent_block() {
+        for (source, destination) in
+            [("/dir1", "/medium_dir"), ("/medium_dir", "/dir1")]
+        {
+            for partial_len in [None, Some(24usize), Some(1024)] {
+                let (mut fs, storage) =
+                    load_compressed_filesystem_rw("test_disk1.bin.zst").await;
+                let old_parent = fs.read_root_inode().await.unwrap().index;
+                let inode = fs
+                    .path_to_inode(
+                        source.try_into().unwrap(),
+                        FollowSymlinks::All,
+                    )
+                    .await
+                    .unwrap();
+                let new_parent = fs
+                    .path_to_inode(
+                        destination.try_into().unwrap(),
+                        FollowSymlinks::All,
+                    )
+                    .await
+                    .unwrap()
+                    .index;
+                let block_index = FileBlocks::from_inode(&inode, fs.clone())
+                    .unwrap()
+                    .get_block(0)
+                    .await
+                    .unwrap();
+                let position = block_index
+                    .checked_mul(fs.superblock().block_size().to_u64())
+                    .unwrap();
+                PtrPrimitive::get_mut(&mut fs.0).unwrap().writer =
+                    Some(Box::new(RejectOneWrite {
+                        inner: MemRw(storage.clone()),
+                        offset: Some(position),
+                        prefix: Vec::new(),
+                        after_write: partial_len.is_some(),
+                        partial_len,
+                        rejected: core::sync::atomic::AtomicBool::new(false),
+                    }));
+                let mut dir = Dir::open_inode(&fs, inode).unwrap();
+                let before = storage.lock().unwrap().clone();
+                let result = dir.reparent(old_parent, new_parent).await;
+                assert!(matches!(result, Err(Ext4Error::Io(_))));
+                assert!(
+                    *storage.lock().unwrap() == before,
+                    "failed reparent changed a directory block"
+                );
+                let parent = dir
+                    .get_entry(DirEntryName::try_from("..").unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(parent.index, old_parent);
+                test_util::fsck_ext4_arc_image(&storage);
+            }
+        }
+    }
 
     #[maybe_async::test(
         feature = "sync",

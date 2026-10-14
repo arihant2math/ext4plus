@@ -46,6 +46,9 @@ pub enum Ext4Error {
     /// non-directory path.
     NotADirectory,
 
+    /// An operation used a directory from another filesystem instance.
+    CrossDevice,
+
     /// An operation that requires a regular file (or a symlink to a
     /// regular file) was attempted on a special file (fifo, character
     /// device, block device, or socket).
@@ -132,6 +135,9 @@ impl Display for Ext4Error {
             Self::NotFound => write!(f, "file not found"),
             Self::IsADirectory => write!(f, "path is a directory"),
             Self::NotADirectory => write!(f, "path is not a directory"),
+            Self::CrossDevice => {
+                write!(f, "operation spans multiple filesystems")
+            }
             Self::IsASpecialFile => write!(f, "path is a special file"),
             Self::FileTooLarge => {
                 write!(f, "file is too large to store in memory")
@@ -190,6 +196,7 @@ impl From<Ext4Error> for std::io::Error {
             Ext4Error::Io(inner) => Self::other(inner),
             Ext4Error::IsADirectory => IsADirectory.into(),
             Ext4Error::NotADirectory => NotADirectory.into(),
+            Ext4Error::CrossDevice => CrossesDevices.into(),
             Ext4Error::NotFound => NotFound.into(),
             Ext4Error::NotUtf8 => InvalidData.into(),
             Ext4Error::Encrypted => PermissionDenied.into(),

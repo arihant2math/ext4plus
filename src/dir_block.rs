@@ -58,18 +58,17 @@ impl DirBlock<'_> {
         assert_eq!(block.len(), block_size);
 
         self.fs.read_from_block(self.block_index, 0, block).await?;
+        let block_type = self.get_block_type(block);
 
         if !self.fs.has_metadata_checksums() {
             return Ok(());
         }
 
-        let block_type = self.get_block_type(block);
-
         let expected_checksum = self.read_expected_checksum(block);
         let actual_checksum = if block_type == DirBlockType::Leaf {
             self.calc_leaf_checksum(block)
         } else {
-            self.calc_internal_checksum(block, block_type)
+            self.calc_internal_checksum(block, block_type)?
         };
 
         if actual_checksum.finalize() == expected_checksum {
@@ -89,23 +88,68 @@ impl DirBlock<'_> {
     ) -> Result<(), Ext4Error> {
         let block_size = self.fs.0.superblock.block_size();
         assert_eq!(block.len(), block_size);
+        let block_type = self.get_block_type(block);
 
         if !self.fs.has_metadata_checksums() {
             return Ok(());
         }
 
-        let block_type = self.get_block_type(block);
-
         let checksum = if block_type == DirBlockType::Leaf {
             self.calc_leaf_checksum(block)
         } else {
-            self.calc_internal_checksum(block, block_type)
+            self.calc_internal_checksum(block, block_type)?
         };
 
         // Stored in the last four bytes of the block.
         let offset = block.len().checked_sub(4).unwrap();
         write_u32le(block, offset, checksum.finalize());
 
+        Ok(())
+    }
+
+    /// Validate the first block before changing its existing ".." entry.
+    pub(crate) fn validate_reparent_layout(
+        &self,
+        block: &[u8],
+    ) -> Result<(), Ext4Error> {
+        debug_assert!(self.is_first);
+        let block_type = self.get_block_type(block);
+        let corrupt = || Ext4Error::from(CorruptKind::DirEntry(self.dir_inode));
+        if block_type == DirBlockType::Leaf {
+            if self.fs.has_metadata_checksums() {
+                let start = block.len().checked_sub(12).ok_or_else(corrupt)?;
+                let end = start.checked_add(8).ok_or_else(corrupt)?;
+                if block[start..end] != [0, 0, 0, 0, 12, 0, 0, 0xde] {
+                    return Err(corrupt());
+                }
+            }
+            return Ok(());
+        }
+        let entries_offset = if block_type == DirBlockType::Root {
+            if read_u32le(block, 0x18) != 0
+                || block[0x1d] != 8
+                || block[0x1f] != 0
+            {
+                return Err(corrupt());
+            }
+            0x20usize
+        } else {
+            0x8usize
+        };
+        let count_offset = entries_offset.checked_add(2).ok_or_else(corrupt)?;
+        let limit = usize::from(read_u16le(block, entries_offset));
+        let count = usize::from(read_u16le(block, count_offset));
+        let tail_size = if self.fs.has_metadata_checksums() {
+            8
+        } else {
+            0
+        };
+        let tail = block.len().checked_sub(tail_size).ok_or_else(corrupt)?;
+        let capacity =
+            tail.checked_sub(entries_offset).ok_or_else(corrupt)? / 8;
+        if limit != capacity || count == 0 || count > limit {
+            return Err(corrupt());
+        }
         Ok(())
     }
 
@@ -136,7 +180,7 @@ impl DirBlock<'_> {
         &self,
         block: &[u8],
         block_type: DirBlockType,
-    ) -> Checksum {
+    ) -> Result<Checksum, Ext4Error> {
         let tail_entry_size = 8;
 
         // OK to unwrap: minimum block size is 1024.
@@ -160,13 +204,17 @@ impl DirBlock<'_> {
         let num_bytes = limit_offset
             .checked_add(usize::from(count).checked_mul(8).unwrap())
             .unwrap();
+        let limit = read_u16le(block, limit_offset);
+        if count == 0 || count > limit || num_bytes > tail_entry_offset {
+            return Err(CorruptKind::DirEntry(self.dir_inode).into());
+        }
 
         let mut checksum = self.checksum_base.clone();
         checksum.update(&block[..num_bytes]);
         checksum.update_u32_le(read_u32le(block, tail_entry_offset));
         checksum.update_u32_le(0);
 
-        checksum
+        Ok(checksum)
     }
 
     fn get_block_type(&self, block: &[u8]) -> DirBlockType {
